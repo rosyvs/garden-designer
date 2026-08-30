@@ -256,4 +256,75 @@ const isingRepulsion: LayoutEngine = {
   },
 };
 
-export const layoutEngines: LayoutEngine[] = [randomRelax, isingRepulsion];
+// Pull every plant a `tension` fraction of the way toward the centroid of all
+// other plants (equivalent, by superposition, to a zero-rest-length linear
+// spring between every pair of plants — just computed in O(n) instead of
+// O(n^2)), then enforce the hard overlap constraint via resolveCollisions.
+const springStep = (
+  plants: PlantInstance[],
+  bedWidth: number,
+  bedHeight: number,
+  overlapPct: number,
+  tension: number
+): PlantInstance[] => {
+  const n = plants.length;
+  if (n < 2) return plants;
+
+  let sumX = 0;
+  let sumY = 0;
+  plants.forEach(p => { sumX += p.x; sumY += p.y; });
+
+  const pulled = plants.map(p => {
+    const targetX = (sumX - p.x) / (n - 1);
+    const targetY = (sumY - p.y) / (n - 1);
+    const x = Math.min(bedWidth, Math.max(0, p.x + (targetX - p.x) * tension));
+    const y = Math.min(bedHeight, Math.max(0, p.y + (targetY - p.y) * tension));
+    return { ...p, x, y };
+  });
+
+  return resolveCollisions(null, pulled, overlapPct);
+};
+
+const springLayout: LayoutEngine = {
+  id: 'spring-layout',
+  label: 'Spring Layout',
+  description: 'Every plant is pulled toward the others by a global spring force — tension controls how strongly — subject to the same hard no-overlap constraint, producing a tightly packed, cohesive bed.',
+  getParamDefs: () => [
+    { key: 'tension', label: 'Spring Tension', min: 0.01, max: 1, step: 0.01, default: 0.15 },
+  ],
+  generate: (plantConfig, bedWidth, bedHeight, overlapPct, params) => {
+    const instances: PlantInstance[] = [];
+    let uid = 0;
+    plantConfig.forEach(pt => {
+      for (let i = 0; i < pt.count; i++) {
+        instances.push({
+          ...pt,
+          instanceId: uid++,
+          x: Math.random() * bedWidth,
+          y: Math.random() * bedHeight,
+        });
+      }
+    });
+
+    let nodes = clampCentersToBed(resolveCollisions(null, instances, overlapPct), bedWidth, bedHeight);
+    if (nodes.length < 2) return nodes;
+
+    const tension = params.tension ?? 0.15;
+    const iterations = Math.max(150, nodes.length * 8);
+    for (let i = 0; i < iterations; i++) {
+      nodes = springStep(nodes, bedWidth, bedHeight, overlapPct, tension);
+    }
+
+    // springStep's collision push-apart (like resolveCollisions everywhere
+    // else) doesn't clamp back into the bed, so the one-shot result needs a
+    // final clamp — matching randomRelax — even though live stepping via the
+    // hold-to-animate button leaves this to the existing out-of-bounds warning.
+    return clampCentersToBed(nodes, bedWidth, bedHeight);
+  },
+  step: (plants, bedWidth, bedHeight, overlapPct, params) => {
+    const tension = params.tension ?? 0.15;
+    return springStep(plants, bedWidth, bedHeight, overlapPct, tension);
+  },
+};
+
+export const layoutEngines: LayoutEngine[] = [randomRelax, isingRepulsion, springLayout];
