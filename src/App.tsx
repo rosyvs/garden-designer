@@ -43,6 +43,7 @@ export default function App() {
   const [designAreaSize, setDesignAreaSize] = useState({ width: 0, height: 0 });
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   const garden3DRef = useRef<Garden3DHandle>(null);
+  const stepAnimRef = useRef<number | null>(null);
 
   // Custom plant type form (setup screen)
   const [customPlantName, setCustomPlantName] = useState('');
@@ -99,6 +100,30 @@ export default function App() {
     setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, overlapPct, resolvedParams));
     setScreen('design');
   };
+
+  const stopIsingStepping = () => {
+    if (stepAnimRef.current !== null) {
+      cancelAnimationFrame(stepAnimRef.current);
+      stepAnimRef.current = null;
+    }
+  };
+
+  const startIsingStepping = () => {
+    const engine = layoutEngines.find(e => e.id === selectedEngineId) ?? layoutEngines[0];
+    if (!engine.step) return;
+    const resolvedParams: Record<string, number> = {};
+    engine.getParamDefs(plantConfig).forEach(def => {
+      resolvedParams[def.key] = engineParams[def.key] ?? def.default;
+    });
+
+    const tick = () => {
+      setActivePlants(prev => engine.step!(prev, bedWidth, bedHeight, overlapPct, resolvedParams));
+      stepAnimRef.current = requestAnimationFrame(tick);
+    };
+    stepAnimRef.current = requestAnimationFrame(tick);
+  };
+
+  useEffect(() => stopIsingStepping, []);
 
   const handlePointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (draggedId === null || !containerRef.current) return;
@@ -567,6 +592,20 @@ export default function App() {
               );
             })}
           </div>
+        )}
+
+        {currentEngine.step && (
+          <button
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              startIsingStepping();
+            }}
+            onPointerUp={stopIsingStepping}
+            onPointerCancel={stopIsingStepping}
+            className="w-full bg-stone-200 active:bg-stone-300 p-2 rounded mb-6 text-sm font-semibold select-none touch-none"
+          >
+            🌀 Hold to Animate Dynamics
+          </button>
         )}
 
         <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 block mb-1">Plant Key</label>

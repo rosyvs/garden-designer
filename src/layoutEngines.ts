@@ -98,6 +98,16 @@ export interface LayoutEngine {
     overlapPct: number,
     params: Record<string, number>
   ) => PlantInstance[];
+  // Optional: advance the given layout by a single Metropolis-Hastings
+  // proposal at a fixed temperature, for engines that support animating
+  // their dynamics live rather than only exposing the annealed result.
+  step?: (
+    plants: PlantInstance[],
+    bedWidth: number,
+    bedHeight: number,
+    overlapPct: number,
+    params: Record<string, number>
+  ) => PlantInstance[];
 }
 
 const randomRelax: LayoutEngine = {
@@ -121,6 +131,63 @@ const randomRelax: LayoutEngine = {
     const relaxed = resolveCollisions(null, instances, overlapPct);
     return clampCentersToBed(relaxed, bedWidth, bedHeight);
   },
+};
+
+// One Metropolis-Hastings proposal: pick a random plant, nudge it by up to
+// moveScale, reject outright (hard constraint) on going out of bounds or
+// violating the allowed-overlap rule, else accept/reject by the change in
+// same-species 1/distance repulsion energy at the given temperature. Returns
+// the same array reference when the proposal is rejected.
+const metropolisPropose = (
+  nodes: PlantInstance[],
+  bedWidth: number,
+  bedHeight: number,
+  allowedOverlapFactor: number,
+  moveScale: number,
+  temperature: number,
+  repulsionByType: Record<number, number>
+): PlantInstance[] => {
+  const n = nodes.length;
+  if (n < 2) return nodes;
+
+  const idx = Math.floor(Math.random() * n);
+  const angle = Math.random() * Math.PI * 2;
+  const newX = nodes[idx].x + Math.cos(angle) * moveScale * Math.random();
+  const newY = nodes[idx].y + Math.sin(angle) * moveScale * Math.random();
+  if (newX < 0 || newX > bedWidth || newY < 0 || newY > bedHeight) return nodes;
+
+  for (let j = 0; j < n; j++) {
+    if (j === idx) continue;
+    const other = nodes[j];
+    const dx = newX - other.x;
+    const dy = newY - other.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minD = (nodes[idx].radius + other.radius) * allowedOverlapFactor;
+    if (dist < minD) return nodes;
+  }
+
+  const self = nodes[idx];
+  const J = repulsionByType[self.id] ?? 0;
+  const energyAt = (x: number, y: number) => {
+    if (J === 0) return 0;
+    let e = 0;
+    for (let j = 0; j < n; j++) {
+      if (j === idx || nodes[j].id !== self.id) continue;
+      const dx = x - nodes[j].x;
+      const dy = y - nodes[j].y;
+      const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
+      e += J / dist;
+    }
+    return e;
+  };
+
+  const dE = energyAt(newX, newY) - energyAt(self.x, self.y);
+  if (dE <= 0 || Math.random() < Math.exp(-dE / Math.max(temperature, 1e-6))) {
+    const next = nodes.slice();
+    next[idx] = { ...self, x: newX, y: newY };
+    return next;
+  }
+  return nodes;
 };
 
 // A 2-spin (Ising-style) graphical model: plants of the same species interact
@@ -159,60 +226,33 @@ const isingRepulsion: LayoutEngine = {
 
     // Start from a state that already satisfies the hard overlap constraint
     // so that rejection sampling below never has to dig out of an invalid one.
-    const nodes = clampCentersToBed(resolveCollisions(null, instances, overlapPct), bedWidth, bedHeight);
-    const n = nodes.length;
-    if (n < 2) return nodes;
+    let nodes = clampCentersToBed(resolveCollisions(null, instances, overlapPct), bedWidth, bedHeight);
+    if (nodes.length < 2) return nodes;
 
     const allowedOverlapFactor = 1 - (overlapPct / 100);
+    const repulsionByType: Record<number, number> = {};
+    plantConfig.forEach(pt => { repulsionByType[pt.id] = params[`repulsion:${pt.id}`] ?? 0; });
     const T0 = params.temperature ?? 1;
-    const iterations = Math.max(2000, n * 150);
+    const iterations = Math.max(2000, nodes.length * 150);
     const bedDiag = Math.sqrt(bedWidth * bedWidth + bedHeight * bedHeight);
-
-    const violatesHardConstraint = (idx: number, x: number, y: number) => {
-      for (let j = 0; j < n; j++) {
-        if (j === idx) continue;
-        const other = nodes[j];
-        const dx = x - other.x;
-        const dy = y - other.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const minD = (nodes[idx].radius + other.radius) * allowedOverlapFactor;
-        if (dist < minD) return true;
-      }
-      return false;
-    };
-
-    const speciesEnergy = (idx: number, x: number, y: number) => {
-      const self = nodes[idx];
-      const J = params[`repulsion:${self.id}`] ?? 0;
-      if (J === 0) return 0;
-      let e = 0;
-      for (let j = 0; j < n; j++) {
-        if (j === idx || nodes[j].id !== self.id) continue;
-        const dx = x - nodes[j].x;
-        const dy = y - nodes[j].y;
-        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
-        e += J / dist;
-      }
-      return e;
-    };
 
     for (let step = 0; step < iterations; step++) {
       const T = T0 * Math.exp((-5 * step) / iterations);
-      const idx = Math.floor(Math.random() * n);
       const moveScale = bedDiag * 0.15 * (T / T0) + bedDiag * 0.01;
-      const angle = Math.random() * Math.PI * 2;
-      const newX = nodes[idx].x + Math.cos(angle) * moveScale * Math.random();
-      const newY = nodes[idx].y + Math.sin(angle) * moveScale * Math.random();
-      if (newX < 0 || newX > bedWidth || newY < 0 || newY > bedHeight) continue;
-      if (violatesHardConstraint(idx, newX, newY)) continue;
-
-      const dE = speciesEnergy(idx, newX, newY) - speciesEnergy(idx, nodes[idx].x, nodes[idx].y);
-      if (dE <= 0 || Math.random() < Math.exp(-dE / Math.max(T, 1e-6))) {
-        nodes[idx] = { ...nodes[idx], x: newX, y: newY };
-      }
+      nodes = metropolisPropose(nodes, bedWidth, bedHeight, allowedOverlapFactor, moveScale, T, repulsionByType);
     }
 
     return nodes;
+  },
+  step: (plants, bedWidth, bedHeight, overlapPct, params) => {
+    if (plants.length < 2) return plants;
+    const allowedOverlapFactor = 1 - (overlapPct / 100);
+    const repulsionByType: Record<number, number> = {};
+    plants.forEach(p => { repulsionByType[p.id] = params[`repulsion:${p.id}`] ?? 0; });
+    const temperature = params.temperature ?? 1;
+    const bedDiag = Math.sqrt(bedWidth * bedWidth + bedHeight * bedHeight);
+    const moveScale = bedDiag * 0.08;
+    return metropolisPropose(plants, bedWidth, bedHeight, allowedOverlapFactor, moveScale, temperature, repulsionByType);
   },
 };
 
