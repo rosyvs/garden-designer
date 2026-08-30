@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import type { ChangeEvent, PointerEvent } from 'react';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faLock, faLockOpen } from '@fortawesome/free-solid-svg-icons';
 import { plantConfig as defaultPlantConfig } from './gardens/butterfly_haven.ts';
-import { layoutEngines, resolveCollisions } from './layoutEngines';
-import type { PlantType, PlantInstance } from './layoutEngines';
+import { layoutEngines, resolveCollisions, isInBed } from './layoutEngines';
+import type { PlantType, PlantInstance, Point } from './layoutEngines';
 import type { Garden3DHandle, CameraPreset } from './Garden3D';
+import BedShapeEditor from './BedShapeEditor';
+import type { BackgroundImage } from './BedShapeEditor';
 
 // three.js is a large dependency (~900KB) — only load it once the user
 // actually switches to 3D mode, so the default 2D experience stays light.
@@ -31,6 +35,8 @@ export default function App() {
   const [screen, setScreen] = useState('setup');
   const [bedWidth, setBedWidth] = useState(10);
   const [bedHeight, setBedHeight] = useState(10);
+  const [bedPolygon, setBedPolygon] = useState<Point[] | null>(null);
+  const [backgroundImage, setBackgroundImage] = useState<BackgroundImage | null>(null);
   const [overlapPct, setOverlapPct] = useState(0);
   const [plantConfig, setPlantConfig] = useState<PlantType[]>(defaultPlantConfig);
   const [activePlants, setActivePlants] = useState<PlantInstance[]>([]);
@@ -60,6 +66,8 @@ export default function App() {
       const parsed = JSON.parse(saved);
       setBedWidth(parsed.bedWidth);
       setBedHeight(parsed.bedHeight);
+      setBedPolygon(parsed.bedPolygon ?? null);
+      setBackgroundImage(parsed.backgroundImage ?? null);
       setOverlapPct(parsed.overlapPct);
       setPlantConfig(parsed.plantConfig || defaultPlantConfig);
       if (parsed.activePlants.length > 0) setActivePlants(parsed.activePlants);
@@ -70,9 +78,9 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('gardenState', JSON.stringify({
-      bedWidth, bedHeight, overlapPct, plantConfig, activePlants, selectedEngineId, engineParams
+      bedWidth, bedHeight, bedPolygon, backgroundImage, overlapPct, plantConfig, activePlants, selectedEngineId, engineParams
     }));
-  }, [bedWidth, bedHeight, overlapPct, plantConfig, activePlants, selectedEngineId, engineParams]);
+  }, [bedWidth, bedHeight, bedPolygon, backgroundImage, overlapPct, plantConfig, activePlants, selectedEngineId, engineParams]);
 
   // Track the actual available space for the design area so the bed can be
   // sized in pixels to exactly match bedWidth:bedHeight (percentage + max-height
@@ -97,8 +105,15 @@ export default function App() {
     engine.getParamDefs(plantConfig).forEach(def => {
       resolvedParams[def.key] = engineParams[def.key] ?? def.default;
     });
-    setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, overlapPct, resolvedParams));
+    const lockedPlants = activePlants.filter(p => p.locked);
+    setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, bedPolygon, overlapPct, resolvedParams, lockedPlants));
     setScreen('design');
+  };
+
+  const toggleLock = (instanceId: number) => {
+    setActivePlants(prev => prev.map(p =>
+      p.instanceId === instanceId ? { ...p, locked: !p.locked } : p
+    ));
   };
 
   const stopIsingStepping = () => {
@@ -123,7 +138,7 @@ export default function App() {
       setActivePlants(prev => {
         let next = prev;
         for (let i = 0; i < stepsPerFrame; i++) {
-          next = engine.step!(next, bedWidth, bedHeight, overlapPct, resolvedParams);
+          next = engine.step!(next, bedWidth, bedHeight, bedPolygon, overlapPct, resolvedParams);
         }
         return next;
       });
@@ -143,7 +158,7 @@ export default function App() {
 
     setActivePlants(prev => {
       const moved = prev.map(p =>
-        p.instanceId === draggedId ? { ...p, x: mouseX, y: mouseY } : p
+        p.instanceId === draggedId && !p.locked ? { ...p, x: mouseX, y: mouseY } : p
       );
       return resolveCollisions(draggedId, moved, overlapPct);
     });
@@ -260,27 +275,53 @@ export default function App() {
             <div className="flex flex-col md:flex-row gap-6">
               <div className="flex-1">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500 mb-3">Bed Dimensions (Feet)</h2>
-                <div className="flex items-center gap-4">
-                  <div className="flex-1">
-                    <label className="text-xs text-slate-500 block mb-1">Width (X)</label>
-                    <input
-                      type="number"
-                      value={bedWidth}
-                      onChange={(e) => setBedWidth(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
-                    />
+                {bedPolygon ? (
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-600">
+                      Custom shape — bounding box {bedWidth.toFixed(1)} × {bedHeight.toFixed(1)} ft
+                    </div>
+                    <button
+                      onClick={() => setScreen('shape-editor')}
+                      className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer whitespace-nowrap"
+                    >
+                      Edit Shape
+                    </button>
+                    <button
+                      onClick={() => { setBedPolygon(null); setBackgroundImage(null); }}
+                      className="text-xs font-semibold text-slate-500 hover:text-slate-700 underline cursor-pointer whitespace-nowrap"
+                    >
+                      Revert to Rectangle
+                    </button>
                   </div>
-                  <span className="text-slate-400 mt-5">×</span>
-                  <div className="flex-1">
-                    <label className="text-xs text-slate-500 block mb-1">Height (Y)</label>
-                    <input
-                      type="number"
-                      value={bedHeight}
-                      onChange={(e) => setBedHeight(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
-                    />
+                ) : (
+                  <div className="flex items-center gap-4">
+                    <div className="flex-1">
+                      <label className="text-xs text-slate-500 block mb-1">Width (X)</label>
+                      <input
+                        type="number"
+                        value={bedWidth}
+                        onChange={(e) => setBedWidth(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                      />
+                    </div>
+                    <span className="text-slate-400 mt-5">×</span>
+                    <div className="flex-1">
+                      <label className="text-xs text-slate-500 block mb-1">Height (Y)</label>
+                      <input
+                        type="number"
+                        value={bedHeight}
+                        onChange={(e) => setBedHeight(Number(e.target.value))}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                      />
+                    </div>
+                    <button
+                      onClick={() => setScreen('shape-editor')}
+                      className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer whitespace-nowrap self-end mb-2.5"
+                    >
+                      ✏️ Draw Custom Shape
+                    </button>
                   </div>
-                </div>
+                )}
               </div>
               <div className="w-full md:w-48">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500 mb-3">Collision Logic</h2>
@@ -500,6 +541,23 @@ export default function App() {
     );
   }
 
+  if (screen === 'shape-editor') {
+    return (
+      <BedShapeEditor
+        initialPolygon={bedPolygon}
+        initialBackgroundImage={backgroundImage}
+        onCancel={() => setScreen('setup')}
+        onSave={(polygon, width, height, image) => {
+          setBedPolygon(polygon);
+          setBedWidth(width);
+          setBedHeight(height);
+          setBackgroundImage(image);
+          setScreen('setup');
+        }}
+      />
+    );
+  }
+
   // Reserve a margin around the bed (at least double the largest plant's
   // diameter) so there's room to drag plants outside the box while
   // rearranging, without them immediately hitting the edge of the pane.
@@ -518,7 +576,7 @@ export default function App() {
     : 0;
   const scale = fitToAvailableSpace ? effBoxWidth / effWidth : 0;
   const padPx = padFeet * scale;
-  const plantsOutOfBounds = activePlants.some(p => p.x < 0 || p.x > bedWidth || p.y < 0 || p.y > bedHeight);
+  const plantsOutOfBounds = activePlants.some(p => !p.locked && !isInBed(p.x, p.y, bedWidth, bedHeight, bedPolygon));
   const currentEngine = layoutEngines.find(e => e.id === selectedEngineId) ?? layoutEngines[0];
   const currentParamDefs = currentEngine.getParamDefs(plantConfig);
 
@@ -630,7 +688,7 @@ export default function App() {
           <div className="w-full h-full flex flex-col">
             <div className="flex-1 rounded-lg overflow-hidden border-2 border-stone-400 bg-stone-100">
               <Suspense fallback={<div className="w-full h-full flex items-center justify-center text-sm text-slate-400">Loading 3D view…</div>}>
-                <Garden3D ref={garden3DRef} bedWidth={bedWidth} bedHeight={bedHeight} activePlants={activePlants} />
+                <Garden3D ref={garden3DRef} bedWidth={bedWidth} bedHeight={bedHeight} bedPolygon={bedPolygon} activePlants={activePlants} />
               </Suspense>
             </div>
             <p className={`text-xs text-right text-amber-600 mt-1 transition-opacity ${plantsOutOfBounds ? 'opacity-100' : 'opacity-0'}`}>
@@ -649,25 +707,67 @@ export default function App() {
             >
               <div
                 ref={containerRef}
-                className="relative w-full h-full bg-stone-200 border-2 border-stone-400"
-                style={{
-                  backgroundImage: 'radial-gradient(#94a3b8 1px, transparent 0)',
-                  backgroundSize: `${100 / bedWidth}% ${100 / bedHeight}%`
-                }}
+                className={`relative w-full h-full bg-stone-200 ${bedPolygon ? '' : 'border-2 border-stone-400'}`}
               >
+                {/* Clipped to the bed's true outline — the dot grid and photo are
+                    backdrop only, so only this layer (not the plants below) is masked. */}
+                <div
+                  className="absolute inset-0 overflow-hidden"
+                  style={{
+                    backgroundImage: 'radial-gradient(#94a3b8 1px, transparent 0)',
+                    backgroundSize: `${100 / bedWidth}% ${100 / bedHeight}%`,
+                    clipPath: bedPolygon
+                      ? `polygon(${bedPolygon.map(v => `${(v.x / bedWidth) * 100}% ${(v.y / bedHeight) * 100}%`).join(', ')})`
+                      : undefined,
+                  }}
+                >
+                  {backgroundImage && (
+                    <img
+                      src={backgroundImage.src}
+                      alt=""
+                      className="absolute pointer-events-none select-none"
+                      style={{
+                        left: `${(backgroundImage.xFt / bedWidth) * 100}%`,
+                        top: `${(backgroundImage.yFt / bedHeight) * 100}%`,
+                        width: `${(backgroundImage.widthFt / bedWidth) * 100}%`,
+                        height: `${(backgroundImage.heightFt / bedHeight) * 100}%`,
+                      }}
+                    />
+                  )}
+                </div>
+                {bedPolygon && (
+                  <svg
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                    viewBox={`0 0 ${bedWidth} ${bedHeight}`}
+                    preserveAspectRatio="none"
+                  >
+                    <polygon
+                      points={bedPolygon.map(v => `${v.x},${v.y}`).join(' ')}
+                      fill="none"
+                      stroke="#78716c"
+                      strokeWidth={Math.max(bedWidth, bedHeight) * 0.006}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                )}
                 {activePlants.map(p => {
-                  const isOutOfBounds = p.x < 0 || p.x > bedWidth || p.y < 0 || p.y > bedHeight;
+                  const isOutOfBounds = !p.locked && !isInBed(p.x, p.y, bedWidth, bedHeight, bedPolygon);
                   return (
                   <div
                     key={p.instanceId}
                     onPointerDown={(e) => {
                       e.stopPropagation();
+                      if (p.locked) return;
                       e.currentTarget.setPointerCapture(e.pointerId);
                       setDraggedId(p.instanceId);
                     }}
                     onPointerMove={handlePointerMove}
                     onPointerUp={() => setDraggedId(null)}
-                    className={`absolute rounded-full shadow-sm cursor-grab touch-none flex items-center justify-center font-bold text-xs ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
+                    // z-index rises on hover (and stays modestly raised while
+                    // locked) so a plant's own corner badge — which pokes just
+                    // outside its circle — always paints above a neighboring,
+                    // later-in-DOM plant that would otherwise cover it.
+                    className={`group absolute rounded-full shadow-sm touch-none flex items-center justify-center font-bold text-xs hover:z-30 ${p.locked ? 'z-10' : 'z-0'} ${p.locked ? 'cursor-not-allowed' : 'cursor-grab'} ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
                     style={{
                       width: `${(p.radius * 2 / bedWidth) * 100}%`,
                       height: `${(p.radius * 2 / bedHeight) * 100}%`,
@@ -680,6 +780,18 @@ export default function App() {
                     }}
                   >
                     {p.id}
+                    <button
+                      type="button"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLock(p.instanceId);
+                      }}
+                      className={`absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border border-stone-400 shadow flex items-center justify-center text-[8px] leading-none cursor-pointer transition-opacity ${p.locked ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                      title={p.locked ? 'Unlock position' : 'Lock position'}
+                    >
+                      <FontAwesomeIcon icon={p.locked ? faLock : faLockOpen} />
+                    </button>
                   </div>
                   );
                 })}

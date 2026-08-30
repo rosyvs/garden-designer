@@ -3,8 +3,9 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { PerspectiveCamera } from 'three';
-import { DoubleSide } from 'three';
-import type { PlantInstance } from './layoutEngines';
+import { DoubleSide, Shape } from 'three';
+import { isInBed } from './layoutEngines';
+import type { PlantInstance, Point } from './layoutEngines';
 
 export type CameraPreset = 'top' | 'isometric' | 'front' | 'reset';
 
@@ -15,6 +16,7 @@ export interface Garden3DHandle {
 interface Garden3DProps {
   bedWidth: number;
   bedHeight: number;
+  bedPolygon: Point[] | null;
   activePlants: PlantInstance[];
 }
 
@@ -25,12 +27,12 @@ const toWorld = (x: number, y: number, bedWidth: number, bedHeight: number): [nu
   y - bedHeight / 2,
 ];
 
-function Plant({ plant, bedWidth, bedHeight }: { plant: PlantInstance; bedWidth: number; bedHeight: number }) {
+function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstance; bedWidth: number; bedHeight: number; bedPolygon: Point[] | null }) {
   const [wx, wz] = toWorld(plant.x, plant.y, bedWidth, bedHeight);
   const footprint = Math.max(plant.spread, 0.1);
   const height = Math.max(plant.height, 0.1);
   const radius = footprint / 2;
-  const isOutOfBounds = plant.x < 0 || plant.x > bedWidth || plant.y < 0 || plant.y > bedHeight;
+  const isOutOfBounds = !plant.locked && !isInBed(plant.x, plant.y, bedWidth, bedHeight, bedPolygon);
 
   return (
     <group position={[wx, 0, wz]}>
@@ -55,11 +57,38 @@ function Plant({ plant, bedWidth, bedHeight }: { plant: PlantInstance; bedWidth:
   );
 }
 
-const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({ bedWidth, bedHeight, activePlants }, ref) => {
+// Ground floor as a THREE.Shape so a custom bed outline is reflected in 3D
+// too, not just the bounding-box rectangle. Local shape coords map to the
+// XZ ground plane via the same convention as toWorld: local (lx, ly) ->
+// world (lx, 0, -ly) after the -90°-about-X rotation applied to the mesh.
+const buildGroundShape = (bedWidth: number, bedHeight: number, bedPolygon: Point[] | null): Shape => {
+  const shape = new Shape();
+  const hw = bedWidth / 2;
+  const hh = bedHeight / 2;
+  let points: [number, number][];
+  if (bedPolygon && bedPolygon.length >= 3) {
+    points = bedPolygon.map(v => [v.x - hw, hh - v.y]);
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const [ax, ay] = points[i];
+      const [bx, by] = points[(i + 1) % points.length];
+      area += ax * by - bx * ay;
+    }
+    if (area < 0) points.reverse();
+  } else {
+    points = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+  }
+  points.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
+  shape.closePath();
+  return shape;
+};
+
+const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({ bedWidth, bedHeight, bedPolygon, activePlants }, ref) => {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const diag = Math.sqrt(bedWidth * bedWidth + bedHeight * bedHeight) || 1;
   const initialDist = diag * 1.3;
   const gridSize = useMemo(() => Math.max(bedWidth, bedHeight), [bedWidth, bedHeight]);
+  const groundShape = useMemo(() => buildGroundShape(bedWidth, bedHeight, bedPolygon), [bedWidth, bedHeight, bedPolygon]);
 
   useImperativeHandle(ref, () => ({
     setView: (preset: CameraPreset) => {
@@ -97,13 +126,13 @@ const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({ bedWidth, bedHeigh
       />
 
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[bedWidth, bedHeight]} />
-        <meshStandardMaterial color="#d6d3d1" />
+        <shapeGeometry args={[groundShape]} />
+        <meshStandardMaterial color="#d6d3d1" side={DoubleSide} />
       </mesh>
       <gridHelper args={[gridSize, gridSize]} position={[0, 0.001, 0]} />
 
       {activePlants.map(p => (
-        <Plant key={p.instanceId} plant={p} bedWidth={bedWidth} bedHeight={bedHeight} />
+        <Plant key={p.instanceId} plant={p} bedWidth={bedWidth} bedHeight={bedHeight} bedPolygon={bedPolygon} />
       ))}
 
       <OrbitControls ref={controlsRef} makeDefault target={[0, 0, 0]} />
