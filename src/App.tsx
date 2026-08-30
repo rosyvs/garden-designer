@@ -116,8 +116,17 @@ export default function App() {
       resolvedParams[def.key] = engineParams[def.key] ?? def.default;
     });
 
+    // Run several proposals per rendered frame so the dynamics visibly
+    // advance faster while held, without dropping below a smooth frame rate.
+    const stepsPerFrame = 8;
     const tick = () => {
-      setActivePlants(prev => engine.step!(prev, bedWidth, bedHeight, overlapPct, resolvedParams));
+      setActivePlants(prev => {
+        let next = prev;
+        for (let i = 0; i < stepsPerFrame; i++) {
+          next = engine.step!(next, bedWidth, bedHeight, overlapPct, resolvedParams);
+        }
+        return next;
+      });
       stepAnimRef.current = requestAnimationFrame(tick);
     };
     stepAnimRef.current = requestAnimationFrame(tick);
