@@ -22,6 +22,20 @@ const presets = Object.entries(presetModules).map(([path, mod]) => {
   return { id: fileName, label, plantConfig: mod.plantConfig };
 });
 
+// Read once at module load (not in an effect): loading state via setState calls
+// inside a mount effect races the save effect, which fires in the same pass
+// with the stale (default) closure and can clobber a real saved garden back
+// to defaults before the load ever takes hold — especially under StrictMode's
+// dev-mode double effect invocation.
+const savedGardenState = (() => {
+  try {
+    const raw = localStorage.getItem('gardenState');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+})();
+
 const getContrastYIQ = (hexcolor: string) => {
   if (!hexcolor) return '#000';
   const hex = hexcolor.replace('#', '');
@@ -33,16 +47,16 @@ const getContrastYIQ = (hexcolor: string) => {
 
 export default function App() {
   const [screen, setScreen] = useState('setup');
-  const [bedWidth, setBedWidth] = useState(10);
-  const [bedHeight, setBedHeight] = useState(10);
-  const [bedPolygon, setBedPolygon] = useState<Point[] | null>(null);
-  const [backgroundImage, setBackgroundImage] = useState<BackgroundImage | null>(null);
-  const [overlapPct, setOverlapPct] = useState(0);
-  const [plantConfig, setPlantConfig] = useState<PlantType[]>(defaultPlantConfig);
-  const [activePlants, setActivePlants] = useState<PlantInstance[]>([]);
+  const [bedWidth, setBedWidth] = useState(() => savedGardenState?.bedWidth ?? 10);
+  const [bedHeight, setBedHeight] = useState(() => savedGardenState?.bedHeight ?? 10);
+  const [bedPolygon, setBedPolygon] = useState<Point[] | null>(() => savedGardenState?.bedPolygon ?? null);
+  const [backgroundImage, setBackgroundImage] = useState<BackgroundImage | null>(() => savedGardenState?.backgroundImage ?? null);
+  const [overlapPct, setOverlapPct] = useState(() => savedGardenState?.overlapPct ?? 0);
+  const [plantConfig, setPlantConfig] = useState<PlantType[]>(() => savedGardenState?.plantConfig || defaultPlantConfig);
+  const [activePlants, setActivePlants] = useState<PlantInstance[]>(() => savedGardenState?.activePlants ?? []);
   const [draggedId, setDraggedId] = useState<number | null>(null);
-  const [selectedEngineId, setSelectedEngineId] = useState(layoutEngines[0].id);
-  const [engineParams, setEngineParams] = useState<Record<string, number>>({});
+  const [selectedEngineId, setSelectedEngineId] = useState(() => savedGardenState?.selectedEngineId || layoutEngines[0].id);
+  const [engineParams, setEngineParams] = useState<Record<string, number>>(() => savedGardenState?.engineParams ?? {});
   const [selectedPresetId, setSelectedPresetId] = useState(presets[0]?.id ?? '');
   const containerRef = useRef<HTMLDivElement>(null);
   const designAreaRef = useRef<HTMLDivElement>(null);
@@ -59,22 +73,6 @@ export default function App() {
   const [customPlantHeightTouched, setCustomPlantHeightTouched] = useState(false);
   const [customPlantShape, setCustomPlantShape] = useState<'sphere' | 'cone'>('sphere');
   const [customPlantQty, setCustomPlantQty] = useState('1');
-
-  useEffect(() => {
-    const saved = localStorage.getItem('gardenState');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setBedWidth(parsed.bedWidth);
-      setBedHeight(parsed.bedHeight);
-      setBedPolygon(parsed.bedPolygon ?? null);
-      setBackgroundImage(parsed.backgroundImage ?? null);
-      setOverlapPct(parsed.overlapPct);
-      setPlantConfig(parsed.plantConfig || defaultPlantConfig);
-      if (parsed.activePlants.length > 0) setActivePlants(parsed.activePlants);
-      if (parsed.selectedEngineId) setSelectedEngineId(parsed.selectedEngineId);
-      if (parsed.engineParams) setEngineParams(parsed.engineParams);
-    }
-  }, []);
 
   useEffect(() => {
     localStorage.setItem('gardenState', JSON.stringify({
@@ -105,7 +103,17 @@ export default function App() {
     engine.getParamDefs(plantConfig).forEach(def => {
       resolvedParams[def.key] = engineParams[def.key] ?? def.default;
     });
-    const lockedPlants = activePlants.filter(p => p.locked);
+    // Locked plants keep their position across regeneration, but their type-level
+    // properties (diameter, color, height, shape) are re-synced from the current
+    // roster — otherwise editing a plant type on the Setup screen would silently
+    // leave already-locked instances stuck at whatever size/color they had when
+    // they were first placed.
+    const lockedPlants = activePlants
+      .filter(p => p.locked)
+      .map(p => {
+        const currentType = plantConfig.find(pt => pt.id === p.id);
+        return currentType ? { ...p, ...currentType, id: p.id, instanceId: p.instanceId, x: p.x, y: p.y, locked: p.locked } : p;
+      });
     setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, bedPolygon, overlapPct, resolvedParams, lockedPlants));
     setScreen('design');
   };
@@ -698,6 +706,7 @@ export default function App() {
         ) : (
           <div className="flex flex-col" style={{ width: fitToAvailableSpace ? `${effBoxWidth}px` : '100%' }}>
             <div
+              className="relative"
               style={{
                 width: fitToAvailableSpace ? `${effBoxWidth}px` : '100%',
                 height: fitToAvailableSpace ? `${effBoxHeight}px` : '100%',
@@ -705,12 +714,28 @@ export default function App() {
                 boxSizing: 'border-box',
               }}
             >
+              {/* Full-bleed backdrop photo, spanning the padded margin as well as the
+                  bed itself — the bed fill/border below is made transparent so this
+                  shows through the whole arrangement screen, not just the bed outline. */}
+              {backgroundImage && (
+                <img
+                  src={backgroundImage.src}
+                  alt=""
+                  className="absolute pointer-events-none select-none"
+                  style={{
+                    left: `${((backgroundImage.xFt + padFeet) / effWidth) * 100}%`,
+                    top: `${((backgroundImage.yFt + padFeet) / effHeight) * 100}%`,
+                    width: `${(backgroundImage.widthFt / effWidth) * 100}%`,
+                    height: `${(backgroundImage.heightFt / effHeight) * 100}%`,
+                  }}
+                />
+              )}
               <div
                 ref={containerRef}
-                className={`relative w-full h-full bg-stone-200 ${bedPolygon ? '' : 'border-2 border-stone-400'}`}
+                className={`relative w-full h-full ${backgroundImage ? 'bg-stone-200/40' : 'bg-stone-200'} ${bedPolygon ? '' : `border-2 ${backgroundImage ? 'border-transparent' : 'border-stone-400'}`}`}
               >
-                {/* Clipped to the bed's true outline — the dot grid and photo are
-                    backdrop only, so only this layer (not the plants below) is masked. */}
+                {/* Clipped to the bed's true outline — the dot grid is backdrop
+                    only, so only this layer (not the plants below) is masked. */}
                 <div
                   className="absolute inset-0 overflow-hidden"
                   style={{
@@ -720,21 +745,7 @@ export default function App() {
                       ? `polygon(${bedPolygon.map(v => `${(v.x / bedWidth) * 100}% ${(v.y / bedHeight) * 100}%`).join(', ')})`
                       : undefined,
                   }}
-                >
-                  {backgroundImage && (
-                    <img
-                      src={backgroundImage.src}
-                      alt=""
-                      className="absolute pointer-events-none select-none"
-                      style={{
-                        left: `${(backgroundImage.xFt / bedWidth) * 100}%`,
-                        top: `${(backgroundImage.yFt / bedHeight) * 100}%`,
-                        width: `${(backgroundImage.widthFt / bedWidth) * 100}%`,
-                        height: `${(backgroundImage.heightFt / bedHeight) * 100}%`,
-                      }}
-                    />
-                  )}
-                </div>
+                />
                 {bedPolygon && (
                   <svg
                     className="absolute inset-0 w-full h-full pointer-events-none"
@@ -744,8 +755,8 @@ export default function App() {
                     <polygon
                       points={bedPolygon.map(v => `${v.x},${v.y}`).join(' ')}
                       fill="none"
-                      stroke="#78716c"
-                      strokeWidth={Math.max(bedWidth, bedHeight) * 0.006}
+                      stroke={backgroundImage ? 'transparent' : '#78716c'}
+                      strokeWidth={Math.max(bedWidth, bedHeight) * 0.06}
                       vectorEffect="non-scaling-stroke"
                     />
                   </svg>
