@@ -1019,9 +1019,14 @@ export default function App() {
           <div key={p.id} className="flex items-center gap-2 mb-2 text-sm">
             <div
               className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold bg-center"
-              style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined, backgroundSize: p.image ? plantImageBgSize(p) : undefined }}
+              style={{
+                backgroundColor: p.color,
+                color: p.textColor,
+                backgroundImage: plantRenderMode === 'photo' && p.image ? `url(${p.image})` : undefined,
+                backgroundSize: plantRenderMode === 'photo' && p.image ? plantImageBgSize(p) : undefined,
+              }}
             >
-              {!p.image && p.id}
+              {(plantRenderMode === 'schematic' || !p.image) && p.id}
             </div>
             <span>{p.name}</span>
           </div>
