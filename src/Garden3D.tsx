@@ -3,9 +3,33 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { PerspectiveCamera } from 'three';
-import { DoubleSide, Shape } from 'three';
+import { DoubleSide, RepeatWrapping, Shape, SRGBColorSpace, TextureLoader } from 'three';
 import { isInBed } from './layoutEngines';
 import type { PlantInstance, Point } from './layoutEngines';
+
+// Cache decoded+cropped textures by src+zoom so identical plant-type images
+// (many instances of the same type) share one GPU upload instead of
+// reloading/recropping it per-instance. Keyed by zoom too since repeat/offset
+// live on the Texture itself, not the material — two different zoom levels
+// of the same source image can't share one Texture object.
+const textureCache = new Map<string, ReturnType<TextureLoader['load']>>();
+const loadPlantTexture = (src: string, zoom: number) => {
+  const key = `${src}|${zoom}`;
+  let tex = textureCache.get(key);
+  if (!tex) {
+    tex = new TextureLoader().load(src);
+    // Photos are stored sRGB-encoded; without this the renderer treats them
+    // as linear data and everything comes out noticeably darker/duller than
+    // the source image (and than the plain `color` fill on other plants).
+    tex.colorSpace = SRGBColorSpace;
+    tex.wrapS = tex.wrapT = RepeatWrapping;
+    const repeat = 1 / zoom;
+    tex.repeat.set(repeat, repeat);
+    tex.offset.set((1 - repeat) / 2, (1 - repeat) / 2);
+    textureCache.set(key, tex);
+  }
+  return tex;
+};
 
 export type CameraPreset = 'top' | 'isometric' | 'front' | 'reset';
 
@@ -33,6 +57,10 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
   const height = Math.max(plant.height, 0.1);
   const radius = footprint / 2;
   const isOutOfBounds = !plant.locked && !isInBed(plant.x, plant.y, bedWidth, bedHeight, bedPolygon);
+  const imageZoom = plant.imageZoom ?? 4;
+  const map = useMemo(() => (plant.image ? loadPlantTexture(plant.image, imageZoom) : null), [plant.image, imageZoom]);
+  const opacity = plant.opacity ?? 1;
+  const materialProps = { color: plant.color, map, transparent: opacity < 1, opacity };
 
   return (
     <group position={[wx, 0, wz]}>
@@ -45,12 +73,17 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
       {plant.shape === 'cone' ? (
         <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
           <coneGeometry args={[radius, height, 24]} />
-          <meshStandardMaterial color={plant.color} />
+          <meshStandardMaterial {...materialProps} />
+        </mesh>
+      ) : plant.shape === 'cylinder' ? (
+        <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
+          <cylinderGeometry args={[radius, radius, height, 24]} />
+          <meshStandardMaterial {...materialProps} />
         </mesh>
       ) : (
         <mesh position={[0, height / 2, 0]} scale={[1, height / footprint, 1]} castShadow receiveShadow>
           <sphereGeometry args={[radius, 24, 16]} />
-          <meshStandardMaterial color={plant.color} />
+          <meshStandardMaterial {...materialProps} />
         </mesh>
       )}
     </group>

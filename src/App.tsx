@@ -3,7 +3,7 @@ import type { ChangeEvent, PointerEvent } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faLock, faLockOpen } from '@fortawesome/free-solid-svg-icons';
 import { plantConfig as defaultPlantConfig } from './gardens/butterfly_haven.ts';
-import { layoutEngines, resolveCollisions, isInBed } from './layoutEngines';
+import { layoutEngines, resolveCollisions, isInBed, sampleRandomPointInBed } from './layoutEngines';
 import type { PlantType, PlantInstance, Point } from './layoutEngines';
 import type { Garden3DHandle, CameraPreset } from './Garden3D';
 import BedShapeEditor from './BedShapeEditor';
@@ -22,6 +22,58 @@ const presets = Object.entries(presetModules).map(([path, mod]) => {
   return { id: fileName, label, plantConfig: mod.plantConfig };
 });
 
+// Same pattern for reusable plant-fill textures — drop an image in
+// src/assets/plant-textures/ and it's immediately pickable in the UI,
+// no code change needed.
+const textureModules = import.meta.glob<string>('./assets/plant-textures/*', { eager: true, import: 'default' });
+const plantTextures = Object.entries(textureModules).map(([path, url]) => {
+  const fileName = path.split('/').pop()!.replace(/\.\w+$/, '');
+  const label = fileName.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return { label, url };
+});
+
+// Read once at module load (not in an effect): loading state via setState calls
+// inside a mount effect races the save effect, which fires in the same pass
+// with the stale (default) closure and can clobber a real saved garden back
+// to defaults before the load ever takes hold — especially under StrictMode's
+// dev-mode double effect invocation.
+const savedGardenState = (() => {
+  try {
+    const raw = localStorage.getItem('gardenState');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+})();
+
+// Crops a plant's fill image toward its center instead of showing it
+// letterboxed/whole — most source photos are framed wide relative to the
+// small circle a plant fill renders at.
+const plantImageBgSize = (p: { imageZoom?: number }) => `${(p.imageZoom ?? 4) * 100}%`;
+
+// Lets a plant's fill image be picked from the bundled texture library
+// (src/assets/plant-textures/) instead of always requiring a fresh upload.
+// A dropdown rather than a thumbnail gallery — with 25+ textures a grid of
+// images per plant card made the roster unusably tall.
+function TextureLibraryPicker({ onSelect }: { onSelect: (url: string) => void }) {
+  if (plantTextures.length === 0) return null;
+  return (
+    <select
+      defaultValue=""
+      onChange={(e) => {
+        if (e.target.value) onSelect(e.target.value);
+        e.target.value = '';
+      }}
+      className="w-full text-[10px] px-1 py-0.5 border border-slate-300 rounded bg-white text-slate-500 cursor-pointer outline-none"
+    >
+      <option value="">Pick from image library…</option>
+      {plantTextures.map(t => (
+        <option key={t.url} value={t.url}>{t.label}</option>
+      ))}
+    </select>
+  );
+}
+
 const getContrastYIQ = (hexcolor: string) => {
   if (!hexcolor) return '#000';
   const hex = hexcolor.replace('#', '');
@@ -33,16 +85,16 @@ const getContrastYIQ = (hexcolor: string) => {
 
 export default function App() {
   const [screen, setScreen] = useState('setup');
-  const [bedWidth, setBedWidth] = useState(10);
-  const [bedHeight, setBedHeight] = useState(10);
-  const [bedPolygon, setBedPolygon] = useState<Point[] | null>(null);
-  const [backgroundImage, setBackgroundImage] = useState<BackgroundImage | null>(null);
-  const [overlapPct, setOverlapPct] = useState(0);
-  const [plantConfig, setPlantConfig] = useState<PlantType[]>(defaultPlantConfig);
-  const [activePlants, setActivePlants] = useState<PlantInstance[]>([]);
+  const [bedWidth, setBedWidth] = useState(() => savedGardenState?.bedWidth ?? 10);
+  const [bedHeight, setBedHeight] = useState(() => savedGardenState?.bedHeight ?? 10);
+  const [bedPolygon, setBedPolygon] = useState<Point[] | null>(() => savedGardenState?.bedPolygon ?? null);
+  const [backgroundImage, setBackgroundImage] = useState<BackgroundImage | null>(() => savedGardenState?.backgroundImage ?? null);
+  const [overlapPct, setOverlapPct] = useState(() => savedGardenState?.overlapPct ?? 0);
+  const [plantConfig, setPlantConfig] = useState<PlantType[]>(() => savedGardenState?.plantConfig || defaultPlantConfig);
+  const [activePlants, setActivePlants] = useState<PlantInstance[]>(() => savedGardenState?.activePlants ?? []);
   const [draggedId, setDraggedId] = useState<number | null>(null);
-  const [selectedEngineId, setSelectedEngineId] = useState(layoutEngines[0].id);
-  const [engineParams, setEngineParams] = useState<Record<string, number>>({});
+  const [selectedEngineId, setSelectedEngineId] = useState(() => savedGardenState?.selectedEngineId || layoutEngines[0].id);
+  const [engineParams, setEngineParams] = useState<Record<string, number>>(() => savedGardenState?.engineParams ?? {});
   const [selectedPresetId, setSelectedPresetId] = useState(presets[0]?.id ?? '');
   const containerRef = useRef<HTMLDivElement>(null);
   const designAreaRef = useRef<HTMLDivElement>(null);
@@ -57,24 +109,11 @@ export default function App() {
   const [customPlantDiameter, setCustomPlantDiameter] = useState('1.5');
   const [customPlantHeight, setCustomPlantHeight] = useState('1.5');
   const [customPlantHeightTouched, setCustomPlantHeightTouched] = useState(false);
-  const [customPlantShape, setCustomPlantShape] = useState<'sphere' | 'cone'>('sphere');
+  const [customPlantShape, setCustomPlantShape] = useState<'sphere' | 'cone' | 'cylinder'>('sphere');
   const [customPlantQty, setCustomPlantQty] = useState('1');
-
-  useEffect(() => {
-    const saved = localStorage.getItem('gardenState');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setBedWidth(parsed.bedWidth);
-      setBedHeight(parsed.bedHeight);
-      setBedPolygon(parsed.bedPolygon ?? null);
-      setBackgroundImage(parsed.backgroundImage ?? null);
-      setOverlapPct(parsed.overlapPct);
-      setPlantConfig(parsed.plantConfig || defaultPlantConfig);
-      if (parsed.activePlants.length > 0) setActivePlants(parsed.activePlants);
-      if (parsed.selectedEngineId) setSelectedEngineId(parsed.selectedEngineId);
-      if (parsed.engineParams) setEngineParams(parsed.engineParams);
-    }
-  }, []);
+  const [customPlantImage, setCustomPlantImage] = useState<string | null>(null);
+  const [customPlantOpacity, setCustomPlantOpacity] = useState('100');
+  const [customPlantImageZoom, setCustomPlantImageZoom] = useState('4');
 
   useEffect(() => {
     localStorage.setItem('gardenState', JSON.stringify({
@@ -105,9 +144,92 @@ export default function App() {
     engine.getParamDefs(plantConfig).forEach(def => {
       resolvedParams[def.key] = engineParams[def.key] ?? def.default;
     });
-    const lockedPlants = activePlants.filter(p => p.locked);
+    // Locked plants keep their position across regeneration, but their type-level
+    // properties (diameter, color, height, shape) are re-synced from the current
+    // roster — otherwise editing a plant type on the Setup screen would silently
+    // leave already-locked instances stuck at whatever size/color they had when
+    // they were first placed.
+    const lockedPlants = activePlants
+      .filter(p => p.locked)
+      .map(p => {
+        const currentType = plantConfig.find(pt => pt.id === p.id);
+        return currentType ? { ...p, ...currentType, id: p.id, instanceId: p.instanceId, x: p.x, y: p.y, locked: p.locked } : p;
+      });
     setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, bedPolygon, overlapPct, resolvedParams, lockedPlants));
     setScreen('design');
+  };
+
+  // Applies roster edits (count/diameter/color/shape/image/opacity, deleted
+  // types) to the existing arrangement without rescattering anything that's
+  // already placed — unlike generateLayout/"Randomise Layout", which is the
+  // deliberate full-reshuffle action. Existing instances keep their position;
+  // only the count delta is added (new instances placed in free space) or
+  // removed (unlocked ones trimmed first).
+  const syncActivePlantsToRoster = () => {
+    const validIds = new Set(plantConfig.map(pt => pt.id));
+    let uid = activePlants.reduce((m, p) => Math.max(m, p.instanceId + 1), 0);
+
+    let next: PlantInstance[] = activePlants
+      .filter(p => validIds.has(p.id))
+      .map(p => {
+        const type = plantConfig.find(pt => pt.id === p.id)!;
+        return { ...type, instanceId: p.instanceId, x: p.x, y: p.y, locked: p.locked };
+      });
+
+    plantConfig.forEach(pt => {
+      const current = next.filter(p => p.id === pt.id);
+      if (current.length > pt.count) {
+        const excess = current.length - pt.count;
+        const removable = current.filter(p => !p.locked).slice(0, excess).map(p => p.instanceId);
+        const toRemove = new Set(removable);
+        next = next.filter(p => !toRemove.has(p.instanceId));
+      } else if (current.length < pt.count) {
+        for (let i = 0; i < pt.count - current.length; i++) {
+          const point = findFreePoint(next, pt.radius);
+          next.push({ ...pt, instanceId: uid++, x: point.x, y: point.y });
+        }
+      }
+    });
+
+    setActivePlants(next);
+    setScreen('design');
+  };
+
+  // Samples a handful of random candidate points and keeps the one with the
+  // least overlap against already-placed plants — used only for inserting
+  // newly-added roster counts, so existing plants never get nudged.
+  const findFreePoint = (existing: PlantInstance[], radius: number): Point => {
+    let best: Point = sampleRandomPointInBed(bedWidth, bedHeight, bedPolygon);
+    let bestOverlap = Infinity;
+    for (let i = 0; i < 30; i++) {
+      const candidate = sampleRandomPointInBed(bedWidth, bedHeight, bedPolygon);
+      const overlap = existing.reduce((sum, p) => {
+        const dist = Math.hypot(p.x - candidate.x, p.y - candidate.y);
+        const minD = p.radius + radius;
+        return sum + Math.max(0, minD - dist);
+      }, 0);
+      if (overlap < bestOverlap) {
+        bestOverlap = overlap;
+        best = candidate;
+        if (overlap === 0) break;
+      }
+    }
+    return best;
+  };
+
+  // Setup screen's "Generate Design Layout": the first-ever layout uses the
+  // selected engine's full scatter, but once an arrangement already exists,
+  // roster edits should only apply their diff (see syncActivePlantsToRoster).
+  const proceedToDesign = () => {
+    if (activePlants.length === 0) {
+      generateLayout();
+    } else {
+      syncActivePlantsToRoster();
+    }
+  };
+
+  const deletePlantType = (id: number) => {
+    setPlantConfig(prev => prev.filter(p => p.id !== id));
   };
 
   const toggleLock = (instanceId: number) => {
@@ -156,11 +278,15 @@ export default function App() {
     const mouseX = (e.clientX - rect.left) * scale;
     const mouseY = (e.clientY - rect.top) * scale;
 
+    // Holding Shift makes the dragged plant "permeable" — it can be moved
+    // through/over other plants without pushing them out of the way.
+    const permeable = e.shiftKey;
+
     setActivePlants(prev => {
       const moved = prev.map(p =>
         p.instanceId === draggedId && !p.locked ? { ...p, x: mouseX, y: mouseY } : p
       );
-      return resolveCollisions(draggedId, moved, overlapPct);
+      return permeable ? moved : resolveCollisions(draggedId, moved, overlapPct);
     });
   };
 
@@ -182,6 +308,24 @@ export default function App() {
     setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, shape } : p));
   };
 
+  const updatePlantOpacity = (id: number, opacityPct: number) => {
+    setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, opacity: Math.min(100, Math.max(0, opacityPct)) / 100 } : p));
+  };
+
+  const updatePlantImage = (id: number, image: string | null) => {
+    setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, image: image ?? undefined } : p));
+  };
+
+  const updatePlantImageZoom = (id: number, zoom: number) => {
+    setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, imageZoom: Math.max(1, zoom) } : p));
+  };
+
+  const readImageFile = (file: File, onLoad: (dataUrl: string) => void) => {
+    const reader = new FileReader();
+    reader.onload = () => onLoad(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
   const handleAddCustomPlantType = () => {
     if (!customPlantName.trim()) return;
     const newId = plantConfig.length > 0 ? Math.max(...plantConfig.map(p => p.id)) + 1 : 1;
@@ -198,7 +342,10 @@ export default function App() {
       defaultSize: size,
       radius: size / 2,
       shape: customPlantShape,
-      count: parseInt(customPlantQty) || 1
+      count: parseInt(customPlantQty) || 1,
+      image: customPlantImage ?? undefined,
+      opacity: (parseFloat(customPlantOpacity) || 100) / 100,
+      imageZoom: parseFloat(customPlantImageZoom) || 4,
     }]);
 
     setCustomPlantName('');
@@ -207,6 +354,9 @@ export default function App() {
     setCustomPlantHeightTouched(false);
     setCustomPlantShape('sphere');
     setCustomPlantQty('1');
+    setCustomPlantImage(null);
+    setCustomPlantOpacity('100');
+    setCustomPlantImageZoom('4');
   };
 
   const handleLoadConfigFile = (e: ChangeEvent<HTMLInputElement>) => {
@@ -251,6 +401,12 @@ export default function App() {
     });
   };
 
+  const handleClearSavedData = () => {
+    if (!window.confirm('Clear all saved garden data (bed shape, background photo, plant roster, arrangement)? This cannot be undone.')) return;
+    localStorage.removeItem('gardenState');
+    window.location.reload();
+  };
+
   const handleExportConfig = () => {
     const blob = new Blob([JSON.stringify(plantConfig, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -267,9 +423,18 @@ export default function App() {
         <div className="max-w-5xl w-full bg-white rounded-xl shadow-lg border border-slate-200 my-auto flex flex-col lg:flex-row overflow-hidden">
 
           <div className="flex-1 p-6 md:p-8 flex flex-col gap-8 lg:border-r border-slate-100">
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Garden Setup</h1>
-              <p className="text-sm text-slate-500 mt-1">Configure dimensions and starting plants (edits are automatically remembered)</p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">Garden Setup</h1>
+                <p className="text-sm text-slate-500 mt-1">Configure dimensions and starting plants (edits are automatically remembered)</p>
+              </div>
+              <button
+                onClick={handleClearSavedData}
+                className="text-xs font-semibold text-slate-400 hover:text-red-600 underline cursor-pointer whitespace-nowrap"
+                title="Clear all saved data (bed shape, background photo, plant roster, arrangement) and start fresh"
+              >
+                🗑️ Clear Saved Data
+              </button>
             </div>
 
             <div className="flex flex-col md:flex-row gap-6">
@@ -369,28 +534,66 @@ export default function App() {
                     </button>
                   </div>
                 )}
-                <label className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer">
-                  Load preset from file
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    onChange={handleLoadConfigFile}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer">
+                    Load preset from file
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={handleLoadConfigFile}
+                      className="hidden"
+                    />
+                  </label>
+                  <button
+                    onClick={handleExportConfig}
+                    className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer"
+                  >
+                    💾 Save Roster to File
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
                 {plantConfig.map((p) => (
-                  <div key={p.id} className="flex flex-col bg-slate-50 p-2.5 rounded-lg border border-slate-200 gap-2">
+                  <div key={p.id} className="relative flex flex-col bg-slate-50 p-2.5 rounded-lg border border-slate-200 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => deletePlantType(p.id)}
+                      title="Delete plant type"
+                      className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border border-stone-400 shadow flex items-center justify-center text-[9px] leading-none text-slate-500 hover:text-red-600 hover:border-red-400 cursor-pointer"
+                    >
+                      ✕
+                    </button>
                     <div className="flex items-center gap-2">
-                      <div
-                        className="w-7 h-7 rounded-full flex shrink-0 items-center justify-center font-bold text-xs shadow-inner"
-                        style={{ backgroundColor: p.color, color: p.textColor }}
+                      <label
+                        className="w-7 h-7 rounded-full flex shrink-0 items-center justify-center font-bold text-xs shadow-inner cursor-pointer bg-center"
+                        style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined, backgroundSize: p.image ? plantImageBgSize(p) : undefined }}
+                        title="Click to set a fill image"
                       >
-                        {p.id}
-                      </div>
-                      <span className="text-[10px] font-medium leading-tight truncate" title={p.name}>{p.name}</span>
+                        {!p.image && p.id}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (file) readImageFile(file, (dataUrl) => updatePlantImage(p.id, dataUrl));
+                          }}
+                        />
+                      </label>
+                      <span className="text-[10px] font-medium leading-tight truncate flex-1" title={p.name}>{p.name}</span>
+                      {p.image && (
+                        <button
+                          type="button"
+                          onClick={() => updatePlantImage(p.id, null)}
+                          className="text-[9px] text-slate-400 hover:text-red-600 cursor-pointer"
+                          title="Remove image"
+                        >
+                          clear img
+                        </button>
+                      )}
                     </div>
+                    <TextureLibraryPicker onSelect={(url) => updatePlantImage(p.id, url)} />
 
                     <div className="w-full space-y-1.5 mt-1">
                       <div className="flex items-center justify-between text-xs">
@@ -428,14 +631,41 @@ export default function App() {
                       <div className="flex items-center justify-between text-xs">
                         <label className="text-slate-500">Shape:</label>
                         <select
-                          value={p.shape === 'cone' ? 'cone' : 'sphere'}
+                          value={p.shape === 'cone' || p.shape === 'cylinder' ? p.shape : 'sphere'}
                           onChange={(e) => updatePlantShape(p.id, e.target.value)}
-                          className="w-16 text-center border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                          className="w-20 text-center border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
                         >
                           <option value="sphere">Ellipse</option>
                           <option value="cone">Cone</option>
+                          <option value="cylinder">Cylinder</option>
                         </select>
                       </div>
+                      <div className="flex items-center justify-between text-xs">
+                        <label className="text-slate-500">Opacity:</label>
+                        <div className="flex items-center gap-1 w-16">
+                          <input
+                            type="range"
+                            min="10" max="100"
+                            value={Math.round((p.opacity ?? 1) * 100)}
+                            onChange={(e) => updatePlantOpacity(p.id, Number(e.target.value))}
+                            className="flex-1 accent-emerald-600"
+                          />
+                        </div>
+                      </div>
+                      {p.image && (
+                        <div className="flex items-center justify-between text-xs">
+                          <label className="text-slate-500">Img Zoom:</label>
+                          <div className="flex items-center gap-1 w-16">
+                            <input
+                              type="range"
+                              min="1" max="8" step="0.5"
+                              value={p.imageZoom ?? 4}
+                              onChange={(e) => updatePlantImageZoom(p.id, Number(e.target.value))}
+                              className="flex-1 accent-emerald-600"
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -443,7 +673,7 @@ export default function App() {
             </div>
 
             <button
-              onClick={generateLayout}
+              onClick={proceedToDesign}
               className="w-full mt-auto py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow-md transition-colors"
             >
               Generate Design Layout
@@ -508,23 +738,73 @@ export default function App() {
                   <label className="text-xs text-slate-500 block mb-1">Shape</label>
                   <select
                     value={customPlantShape}
-                    onChange={(e) => setCustomPlantShape(e.target.value === 'cone' ? 'cone' : 'sphere')}
+                    onChange={(e) => setCustomPlantShape(e.target.value === 'cone' || e.target.value === 'cylinder' ? e.target.value : 'sphere')}
                     className="w-full px-2 py-1 bg-slate-50 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                   >
                     <option value="sphere">Ellipse</option>
                     <option value="cone">Cone</option>
+                    <option value="cylinder">Cylinder</option>
                   </select>
                 </div>
               </div>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="text-xs text-slate-500 block mb-1">Initial Qty</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={customPlantQty}
+                    onChange={(e) => setCustomPlantQty(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-xs text-slate-500 block mb-1">Opacity (%)</label>
+                  <input
+                    type="number"
+                    min="10" max="100"
+                    value={customPlantOpacity}
+                    onChange={(e) => setCustomPlantOpacity(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
               <div>
-                <label className="text-xs text-slate-500 block mb-1">Initial Qty</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={customPlantQty}
-                  onChange={(e) => setCustomPlantQty(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
-                />
+                <label className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline cursor-pointer">
+                  {customPlantImage ? 'Replace Fill Image' : 'Load Fill Image (optional)'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) readImageFile(file, setCustomPlantImage);
+                    }}
+                  />
+                </label>
+                <div className="mt-1">
+                  <TextureLibraryPicker onSelect={setCustomPlantImage} />
+                </div>
+                {customPlantImage && (
+                  <div className="flex items-center gap-2 mt-1">
+                    <div
+                      className="w-8 h-8 rounded-full bg-center border border-slate-300"
+                      style={{ backgroundImage: `url(${customPlantImage})`, backgroundSize: `${(parseFloat(customPlantImageZoom) || 4) * 100}%` }}
+                    />
+                    <button onClick={() => setCustomPlantImage(null)} className="text-[10px] text-slate-400 hover:text-red-600 cursor-pointer">clear image</button>
+                    <label className="text-[10px] text-slate-500 ml-auto flex items-center gap-1">
+                      Zoom
+                      <input
+                        type="range"
+                        min="1" max="8" step="0.5"
+                        value={customPlantImageZoom}
+                        onChange={(e) => setCustomPlantImageZoom(e.target.value)}
+                        className="w-16 accent-emerald-600"
+                      />
+                    </label>
+                  </div>
+                )}
               </div>
               <button
                 onClick={handleAddCustomPlantType}
@@ -678,7 +958,12 @@ export default function App() {
         <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 block mb-1">Plant Key</label>
         {plantConfig.map(p => (
           <div key={p.id} className="flex items-center gap-2 mb-2 text-sm">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold" style={{ backgroundColor: p.color, color: p.textColor }}>{p.id}</div>
+            <div
+              className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold bg-center"
+              style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined, backgroundSize: p.image ? plantImageBgSize(p) : undefined }}
+            >
+              {!p.image && p.id}
+            </div>
             <span>{p.name}</span>
           </div>
         ))}
@@ -698,6 +983,7 @@ export default function App() {
         ) : (
           <div className="flex flex-col" style={{ width: fitToAvailableSpace ? `${effBoxWidth}px` : '100%' }}>
             <div
+              className="relative"
               style={{
                 width: fitToAvailableSpace ? `${effBoxWidth}px` : '100%',
                 height: fitToAvailableSpace ? `${effBoxHeight}px` : '100%',
@@ -705,12 +991,28 @@ export default function App() {
                 boxSizing: 'border-box',
               }}
             >
+              {/* Full-bleed backdrop photo, spanning the padded margin as well as the
+                  bed itself — the bed fill/border below is made transparent so this
+                  shows through the whole arrangement screen, not just the bed outline. */}
+              {backgroundImage && (
+                <img
+                  src={backgroundImage.src}
+                  alt=""
+                  className="absolute pointer-events-none select-none"
+                  style={{
+                    left: `${((backgroundImage.xFt + padFeet) / effWidth) * 100}%`,
+                    top: `${((backgroundImage.yFt + padFeet) / effHeight) * 100}%`,
+                    width: `${(backgroundImage.widthFt / effWidth) * 100}%`,
+                    height: `${(backgroundImage.heightFt / effHeight) * 100}%`,
+                  }}
+                />
+              )}
               <div
                 ref={containerRef}
-                className={`relative w-full h-full bg-stone-200 ${bedPolygon ? '' : 'border-2 border-stone-400'}`}
+                className={`relative w-full h-full ${backgroundImage ? 'bg-stone-200/40' : 'bg-stone-200'} ${bedPolygon ? '' : `border-2 ${backgroundImage ? 'border-transparent' : 'border-stone-400'}`}`}
               >
-                {/* Clipped to the bed's true outline — the dot grid and photo are
-                    backdrop only, so only this layer (not the plants below) is masked. */}
+                {/* Clipped to the bed's true outline — the dot grid is backdrop
+                    only, so only this layer (not the plants below) is masked. */}
                 <div
                   className="absolute inset-0 overflow-hidden"
                   style={{
@@ -720,21 +1022,7 @@ export default function App() {
                       ? `polygon(${bedPolygon.map(v => `${(v.x / bedWidth) * 100}% ${(v.y / bedHeight) * 100}%`).join(', ')})`
                       : undefined,
                   }}
-                >
-                  {backgroundImage && (
-                    <img
-                      src={backgroundImage.src}
-                      alt=""
-                      className="absolute pointer-events-none select-none"
-                      style={{
-                        left: `${(backgroundImage.xFt / bedWidth) * 100}%`,
-                        top: `${(backgroundImage.yFt / bedHeight) * 100}%`,
-                        width: `${(backgroundImage.widthFt / bedWidth) * 100}%`,
-                        height: `${(backgroundImage.heightFt / bedHeight) * 100}%`,
-                      }}
-                    />
-                  )}
-                </div>
+                />
                 {bedPolygon && (
                   <svg
                     className="absolute inset-0 w-full h-full pointer-events-none"
@@ -744,8 +1032,8 @@ export default function App() {
                     <polygon
                       points={bedPolygon.map(v => `${v.x},${v.y}`).join(' ')}
                       fill="none"
-                      stroke="#78716c"
-                      strokeWidth={Math.max(bedWidth, bedHeight) * 0.006}
+                      stroke="#000"
+                      strokeWidth={3}
                       vectorEffect="non-scaling-stroke"
                     />
                   </svg>
@@ -767,15 +1055,17 @@ export default function App() {
                     // locked) so a plant's own corner badge — which pokes just
                     // outside its circle — always paints above a neighboring,
                     // later-in-DOM plant that would otherwise cover it.
-                    className={`group absolute rounded-full shadow-sm touch-none flex items-center justify-center font-bold text-xs hover:z-30 ${p.locked ? 'z-10' : 'z-0'} ${p.locked ? 'cursor-not-allowed' : 'cursor-grab'} ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
+                    className={`group absolute rounded-full shadow-sm touch-none flex items-center justify-center font-bold text-xs hover:z-30 bg-center ${p.locked ? 'z-10' : 'z-0'} ${p.locked ? 'cursor-not-allowed' : 'cursor-grab'} ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
                     style={{
                       width: `${(p.radius * 2 / bedWidth) * 100}%`,
                       height: `${(p.radius * 2 / bedHeight) * 100}%`,
                       left: `${((p.x - p.radius) / bedWidth) * 100}%`,
                       top: `${((p.y - p.radius) / bedHeight) * 100}%`,
                       backgroundColor: p.color,
+                      backgroundImage: p.image ? `url(${p.image})` : undefined,
+                      backgroundSize: p.image ? plantImageBgSize(p) : undefined,
                       color: p.textColor,
-                      opacity: draggedId === p.instanceId ? 0.6 : 0.9,
+                      opacity: (draggedId === p.instanceId ? 0.6 : 0.9) * (p.opacity ?? 1),
                       transition: draggedId === p.instanceId ? 'none' : 'transform 0.1s ease-out'
                     }}
                   >

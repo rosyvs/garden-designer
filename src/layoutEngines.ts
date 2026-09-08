@@ -9,6 +9,15 @@ export interface PlantType {
   defaultSize: number;
   radius: number;
   count: number;
+  // Optional data-URI image used as a fill texture instead of a flat color.
+  image?: string;
+  // Fill opacity, 0-1. Undefined is treated as fully opaque (1).
+  opacity?: number;
+  // How much to crop into the fill image, centered. 1 = whole image, 2 = 2x
+  // zoomed in (half the image visible), etc. Undefined defaults to 4 — most
+  // source photos are framed wide, so a tighter crop reads better at the
+  // small size a plant fill renders at.
+  imageZoom?: number;
 }
 
 export interface PlantInstance extends PlantType {
