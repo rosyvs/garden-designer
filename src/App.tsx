@@ -36,6 +36,11 @@ const savedGardenState = (() => {
   }
 })();
 
+// Crops a plant's fill image toward its center instead of showing it
+// letterboxed/whole — most source photos are framed wide relative to the
+// small circle a plant fill renders at.
+const plantImageBgSize = (p: { imageZoom?: number }) => `${(p.imageZoom ?? 4) * 100}%`;
+
 const getContrastYIQ = (hexcolor: string) => {
   if (!hexcolor) return '#000';
   const hex = hexcolor.replace('#', '');
@@ -75,6 +80,7 @@ export default function App() {
   const [customPlantQty, setCustomPlantQty] = useState('1');
   const [customPlantImage, setCustomPlantImage] = useState<string | null>(null);
   const [customPlantOpacity, setCustomPlantOpacity] = useState('100');
+  const [customPlantImageZoom, setCustomPlantImageZoom] = useState('4');
 
   useEffect(() => {
     localStorage.setItem('gardenState', JSON.stringify({
@@ -239,11 +245,15 @@ export default function App() {
     const mouseX = (e.clientX - rect.left) * scale;
     const mouseY = (e.clientY - rect.top) * scale;
 
+    // Holding Shift makes the dragged plant "permeable" — it can be moved
+    // through/over other plants without pushing them out of the way.
+    const permeable = e.shiftKey;
+
     setActivePlants(prev => {
       const moved = prev.map(p =>
         p.instanceId === draggedId && !p.locked ? { ...p, x: mouseX, y: mouseY } : p
       );
-      return resolveCollisions(draggedId, moved, overlapPct);
+      return permeable ? moved : resolveCollisions(draggedId, moved, overlapPct);
     });
   };
 
@@ -273,6 +283,10 @@ export default function App() {
     setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, image: image ?? undefined } : p));
   };
 
+  const updatePlantImageZoom = (id: number, zoom: number) => {
+    setPlantConfig(prev => prev.map(p => p.id === id ? { ...p, imageZoom: Math.max(1, zoom) } : p));
+  };
+
   const readImageFile = (file: File, onLoad: (dataUrl: string) => void) => {
     const reader = new FileReader();
     reader.onload = () => onLoad(reader.result as string);
@@ -298,6 +312,7 @@ export default function App() {
       count: parseInt(customPlantQty) || 1,
       image: customPlantImage ?? undefined,
       opacity: (parseFloat(customPlantOpacity) || 100) / 100,
+      imageZoom: parseFloat(customPlantImageZoom) || 4,
     }]);
 
     setCustomPlantName('');
@@ -308,6 +323,7 @@ export default function App() {
     setCustomPlantQty('1');
     setCustomPlantImage(null);
     setCustomPlantOpacity('100');
+    setCustomPlantImageZoom('4');
   };
 
   const handleLoadConfigFile = (e: ChangeEvent<HTMLInputElement>) => {
@@ -352,6 +368,12 @@ export default function App() {
     });
   };
 
+  const handleClearSavedData = () => {
+    if (!window.confirm('Clear all saved garden data (bed shape, background photo, plant roster, arrangement)? This cannot be undone.')) return;
+    localStorage.removeItem('gardenState');
+    window.location.reload();
+  };
+
   const handleExportConfig = () => {
     const blob = new Blob([JSON.stringify(plantConfig, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -368,9 +390,18 @@ export default function App() {
         <div className="max-w-5xl w-full bg-white rounded-xl shadow-lg border border-slate-200 my-auto flex flex-col lg:flex-row overflow-hidden">
 
           <div className="flex-1 p-6 md:p-8 flex flex-col gap-8 lg:border-r border-slate-100">
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Garden Setup</h1>
-              <p className="text-sm text-slate-500 mt-1">Configure dimensions and starting plants (edits are automatically remembered)</p>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">Garden Setup</h1>
+                <p className="text-sm text-slate-500 mt-1">Configure dimensions and starting plants (edits are automatically remembered)</p>
+              </div>
+              <button
+                onClick={handleClearSavedData}
+                className="text-xs font-semibold text-slate-400 hover:text-red-600 underline cursor-pointer whitespace-nowrap"
+                title="Clear all saved data (bed shape, background photo, plant roster, arrangement) and start fresh"
+              >
+                🗑️ Clear Saved Data
+              </button>
             </div>
 
             <div className="flex flex-col md:flex-row gap-6">
@@ -501,8 +532,8 @@ export default function App() {
                     </button>
                     <div className="flex items-center gap-2">
                       <label
-                        className="w-7 h-7 rounded-full flex shrink-0 items-center justify-center font-bold text-xs shadow-inner cursor-pointer bg-cover bg-center"
-                        style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined }}
+                        className="w-7 h-7 rounded-full flex shrink-0 items-center justify-center font-bold text-xs shadow-inner cursor-pointer bg-center"
+                        style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined, backgroundSize: p.image ? plantImageBgSize(p) : undefined }}
                         title="Click to set a fill image"
                       >
                         {!p.image && p.id}
@@ -587,6 +618,20 @@ export default function App() {
                           />
                         </div>
                       </div>
+                      {p.image && (
+                        <div className="flex items-center justify-between text-xs">
+                          <label className="text-slate-500">Img Zoom:</label>
+                          <div className="flex items-center gap-1 w-16">
+                            <input
+                              type="range"
+                              min="1" max="8" step="0.5"
+                              value={p.imageZoom ?? 4}
+                              onChange={(e) => updatePlantImageZoom(p.id, Number(e.target.value))}
+                              className="flex-1 accent-emerald-600"
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -706,8 +751,21 @@ export default function App() {
                 </label>
                 {customPlantImage && (
                   <div className="flex items-center gap-2 mt-1">
-                    <div className="w-8 h-8 rounded-full bg-cover bg-center border border-slate-300" style={{ backgroundImage: `url(${customPlantImage})` }} />
+                    <div
+                      className="w-8 h-8 rounded-full bg-center border border-slate-300"
+                      style={{ backgroundImage: `url(${customPlantImage})`, backgroundSize: `${(parseFloat(customPlantImageZoom) || 4) * 100}%` }}
+                    />
                     <button onClick={() => setCustomPlantImage(null)} className="text-[10px] text-slate-400 hover:text-red-600 cursor-pointer">clear image</button>
+                    <label className="text-[10px] text-slate-500 ml-auto flex items-center gap-1">
+                      Zoom
+                      <input
+                        type="range"
+                        min="1" max="8" step="0.5"
+                        value={customPlantImageZoom}
+                        onChange={(e) => setCustomPlantImageZoom(e.target.value)}
+                        className="w-16 accent-emerald-600"
+                      />
+                    </label>
                   </div>
                 )}
               </div>
@@ -864,8 +922,8 @@ export default function App() {
         {plantConfig.map(p => (
           <div key={p.id} className="flex items-center gap-2 mb-2 text-sm">
             <div
-              className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold bg-cover bg-center"
-              style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined }}
+              className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold bg-center"
+              style={{ backgroundColor: p.color, color: p.textColor, backgroundImage: p.image ? `url(${p.image})` : undefined, backgroundSize: p.image ? plantImageBgSize(p) : undefined }}
             >
               {!p.image && p.id}
             </div>
@@ -937,8 +995,8 @@ export default function App() {
                     <polygon
                       points={bedPolygon.map(v => `${v.x},${v.y}`).join(' ')}
                       fill="none"
-                      stroke={backgroundImage ? 'transparent' : '#78716c'}
-                      strokeWidth={Math.max(bedWidth, bedHeight) * 0.06}
+                      stroke="#000"
+                      strokeWidth={3}
                       vectorEffect="non-scaling-stroke"
                     />
                   </svg>
@@ -960,7 +1018,7 @@ export default function App() {
                     // locked) so a plant's own corner badge — which pokes just
                     // outside its circle — always paints above a neighboring,
                     // later-in-DOM plant that would otherwise cover it.
-                    className={`group absolute rounded-full shadow-sm touch-none flex items-center justify-center font-bold text-xs hover:z-30 bg-cover bg-center ${p.locked ? 'z-10' : 'z-0'} ${p.locked ? 'cursor-not-allowed' : 'cursor-grab'} ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
+                    className={`group absolute rounded-full shadow-sm touch-none flex items-center justify-center font-bold text-xs hover:z-30 bg-center ${p.locked ? 'z-10' : 'z-0'} ${p.locked ? 'cursor-not-allowed' : 'cursor-grab'} ${isOutOfBounds ? 'border-2 border-red-600' : 'border border-stone-800'}`}
                     style={{
                       width: `${(p.radius * 2 / bedWidth) * 100}%`,
                       height: `${(p.radius * 2 / bedHeight) * 100}%`,
@@ -968,6 +1026,7 @@ export default function App() {
                       top: `${((p.y - p.radius) / bedHeight) * 100}%`,
                       backgroundColor: p.color,
                       backgroundImage: p.image ? `url(${p.image})` : undefined,
+                      backgroundSize: p.image ? plantImageBgSize(p) : undefined,
                       color: p.textColor,
                       opacity: (draggedId === p.instanceId ? 0.6 : 0.9) * (p.opacity ?? 1),
                       transition: draggedId === p.instanceId ? 'none' : 'transform 0.1s ease-out'
