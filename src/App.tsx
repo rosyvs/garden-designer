@@ -93,7 +93,7 @@ export default function App() {
   const [plantConfig, setPlantConfig] = useState<PlantType[]>(() => savedGardenState?.plantConfig || defaultPlantConfig);
   const [activePlants, setActivePlants] = useState<PlantInstance[]>(() => savedGardenState?.activePlants ?? []);
   const [draggedId, setDraggedId] = useState<number | null>(null);
-  const [dragHistory, setDragHistory] = useState<PlantInstance[][]>([]);
+  const [arrangementHistory, setArrangementHistory] = useState<PlantInstance[][]>([]);
   const dragStartSnapshotRef = useRef<PlantInstance[] | null>(null);
   const [selectedEngineId, setSelectedEngineId] = useState(() => savedGardenState?.selectedEngineId || layoutEngines[0].id);
   const [engineParams, setEngineParams] = useState<Record<string, number>>(() => savedGardenState?.engineParams ?? {});
@@ -159,6 +159,7 @@ export default function App() {
         const currentType = plantConfig.find(pt => pt.id === p.id);
         return currentType ? { ...p, ...currentType, id: p.id, instanceId: p.instanceId, x: p.x, y: p.y, locked: p.locked } : p;
       });
+    if (activePlants.length > 0) pushArrangementHistory(activePlants);
     setActivePlants(engine.generate(plantConfig, bedWidth, bedHeight, bedPolygon, overlapPct, resolvedParams, lockedPlants));
     setScreen('design');
   };
@@ -242,12 +243,16 @@ export default function App() {
     ));
   };
 
-  // Capped so an unbroken session of dragging plants around doesn't grow
-  // this without bound.
-  const MAX_DRAG_HISTORY = 50;
+  // Capped so an unbroken session of dragging/randomising doesn't grow this
+  // without bound.
+  const MAX_ARRANGEMENT_HISTORY = 50;
 
-  const undoLastDrag = () => {
-    setDragHistory(prev => {
+  const pushArrangementHistory = (snapshot: PlantInstance[]) => {
+    setArrangementHistory(prev => [...prev.slice(-(MAX_ARRANGEMENT_HISTORY - 1)), snapshot]);
+  };
+
+  const undoLastArrangementChange = () => {
+    setArrangementHistory(prev => {
       if (prev.length === 0) return prev;
       setActivePlants(prev[prev.length - 1]);
       return prev.slice(0, -1);
@@ -987,12 +992,12 @@ export default function App() {
         <button onClick={generateLayout} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm font-semibold">🎲 Randomise Layout</button>
         {viewMode === '2d' && (
           <button
-            onClick={undoLastDrag}
-            disabled={dragHistory.length === 0}
-            title={dragHistory.length === 0 ? 'No drag to undo' : `Undo last drag (${dragHistory.length} available)`}
+            onClick={undoLastArrangementChange}
+            disabled={arrangementHistory.length === 0}
+            title={arrangementHistory.length === 0 ? 'Nothing to undo' : `Undo last change (${arrangementHistory.length} available)`}
             className="w-full bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-stone-300 p-2 rounded mb-4 text-sm font-semibold"
           >
-            ↩️ Undo Drag
+            ↩️ Undo
           </button>
         )}
         <button onClick={() => setScreen('setup')} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm">⚙️ Back to Setup</button>
@@ -1028,6 +1033,7 @@ export default function App() {
           <button
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
+              pushArrangementHistory(activePlants);
               startIsingStepping();
             }}
             onPointerUp={stopIsingStepping}
@@ -1146,9 +1152,7 @@ export default function App() {
                       setDraggedId(null);
                       const snapshot = dragStartSnapshotRef.current;
                       dragStartSnapshotRef.current = null;
-                      if (snapshot) {
-                        setDragHistory(prev => [...prev.slice(-(MAX_DRAG_HISTORY - 1)), snapshot]);
-                      }
+                      if (snapshot) pushArrangementHistory(snapshot);
                     }}
                     // z-index rises on hover (and stays modestly raised while
                     // locked) so a plant's own corner badge — which pokes just
