@@ -22,6 +22,16 @@ const presets = Object.entries(presetModules).map(([path, mod]) => {
   return { id: fileName, label, plantConfig: mod.plantConfig };
 });
 
+// Same pattern for reusable plant-fill textures — drop an image in
+// src/assets/plant-textures/ and it's immediately pickable in the UI,
+// no code change needed.
+const textureModules = import.meta.glob<string>('./assets/plant-textures/*', { eager: true, import: 'default' });
+const plantTextures = Object.entries(textureModules).map(([path, url]) => {
+  const fileName = path.split('/').pop()!.replace(/\.\w+$/, '');
+  const label = fileName.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return { label, url };
+});
+
 // Read once at module load (not in an effect): loading state via setState calls
 // inside a mount effect races the save effect, which fires in the same pass
 // with the stale (default) closure and can clobber a real saved garden back
@@ -40,6 +50,29 @@ const savedGardenState = (() => {
 // letterboxed/whole — most source photos are framed wide relative to the
 // small circle a plant fill renders at.
 const plantImageBgSize = (p: { imageZoom?: number }) => `${(p.imageZoom ?? 4) * 100}%`;
+
+// Lets a plant's fill image be picked from the bundled texture library
+// (src/assets/plant-textures/) instead of always requiring a fresh upload.
+// A dropdown rather than a thumbnail gallery — with 25+ textures a grid of
+// images per plant card made the roster unusably tall.
+function TextureLibraryPicker({ onSelect }: { onSelect: (url: string) => void }) {
+  if (plantTextures.length === 0) return null;
+  return (
+    <select
+      defaultValue=""
+      onChange={(e) => {
+        if (e.target.value) onSelect(e.target.value);
+        e.target.value = '';
+      }}
+      className="w-full text-[10px] px-1 py-0.5 border border-slate-300 rounded bg-white text-slate-500 cursor-pointer outline-none"
+    >
+      <option value="">Pick from image library…</option>
+      {plantTextures.map(t => (
+        <option key={t.url} value={t.url}>{t.label}</option>
+      ))}
+    </select>
+  );
+}
 
 const getContrastYIQ = (hexcolor: string) => {
   if (!hexcolor) return '#000';
@@ -560,6 +593,7 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                    <TextureLibraryPicker onSelect={(url) => updatePlantImage(p.id, url)} />
 
                     <div className="w-full space-y-1.5 mt-1">
                       <div className="flex items-center justify-between text-xs">
@@ -749,6 +783,9 @@ export default function App() {
                     }}
                   />
                 </label>
+                <div className="mt-1">
+                  <TextureLibraryPicker onSelect={setCustomPlantImage} />
+                </div>
                 {customPlantImage && (
                   <div className="flex items-center gap-2 mt-1">
                     <div
