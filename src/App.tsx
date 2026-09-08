@@ -113,7 +113,7 @@ export default function App() {
   const [customPlantDiameter, setCustomPlantDiameter] = useState('1.5');
   const [customPlantHeight, setCustomPlantHeight] = useState('1.5');
   const [customPlantHeightTouched, setCustomPlantHeightTouched] = useState(false);
-  const [customPlantShape, setCustomPlantShape] = useState<'sphere' | 'cone' | 'cylinder'>('sphere');
+  const [customPlantShape, setCustomPlantShape] = useState<'sphere' | 'cone' | 'cone-inverted' | 'cylinder'>('sphere');
   const [customPlantQty, setCustomPlantQty] = useState('1');
   const [customPlantImage, setCustomPlantImage] = useState<string | null>(null);
   const [customPlantOpacity, setCustomPlantOpacity] = useState('100');
@@ -652,12 +652,13 @@ export default function App() {
                       <div className="flex items-center justify-between text-xs">
                         <label className="text-slate-500">Shape:</label>
                         <select
-                          value={p.shape === 'cone' || p.shape === 'cylinder' ? p.shape : 'sphere'}
+                          value={['cone', 'cone-inverted', 'cylinder'].includes(p.shape) ? p.shape : 'sphere'}
                           onChange={(e) => updatePlantShape(p.id, e.target.value)}
-                          className="w-20 text-center border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                          className="w-24 text-center border border-slate-300 rounded focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
                         >
                           <option value="sphere">Ellipse</option>
                           <option value="cone">Cone</option>
+                          <option value="cone-inverted">Cone (inverse)</option>
                           <option value="cylinder">Cylinder</option>
                         </select>
                       </div>
@@ -759,11 +760,12 @@ export default function App() {
                   <label className="text-xs text-slate-500 block mb-1">Shape</label>
                   <select
                     value={customPlantShape}
-                    onChange={(e) => setCustomPlantShape(e.target.value === 'cone' || e.target.value === 'cylinder' ? e.target.value : 'sphere')}
+                    onChange={(e) => setCustomPlantShape(['cone', 'cone-inverted', 'cylinder'].includes(e.target.value) ? e.target.value as typeof customPlantShape : 'sphere')}
                     className="w-full px-2 py-1 bg-slate-50 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                   >
                     <option value="sphere">Ellipse</option>
                     <option value="cone">Cone</option>
+                    <option value="cone-inverted">Cone (inverse)</option>
                     <option value="cylinder">Cylinder</option>
                   </select>
                 </div>

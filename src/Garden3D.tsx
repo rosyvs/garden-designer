@@ -73,8 +73,16 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
           <meshBasicMaterial color="#dc2626" side={DoubleSide} />
         </mesh>
       )}
-      {plant.shape === 'cone' ? (
-        <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
+      {plant.shape === 'cone' || plant.shape === 'cone-inverted' ? (
+        // A plain coneGeometry has its apex up, base down. Rotating 180°
+        // about X flips that to apex-down, flared top — a funnel/vase
+        // silhouette — while keeping the same vertical center position.
+        <mesh
+          position={[0, height / 2, 0]}
+          rotation={plant.shape === 'cone-inverted' ? [Math.PI, 0, 0] : [0, 0, 0]}
+          castShadow
+          receiveShadow
+        >
           <coneGeometry args={[radius, height, 24]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
