@@ -137,7 +137,12 @@ export const resolveCollisions = (
   currentPlants: PlantInstance[],
   overlapPct: number
 ): PlantInstance[] => {
-  const nodes = [...currentPlants];
+  // Copy each plant object, not just the array — the loop below mutates
+  // nodes[i]/nodes[j] in place, and a shallow array copy would leave those
+  // mutations landing on the *same* plant objects still referenced by
+  // `currentPlants` (and by anything else holding onto that array, e.g. an
+  // undo-history snapshot taken before this call).
+  const nodes = currentPlants.map(p => ({ ...p }));
   let relaxing = true;
   let loops = 0;
   const allowedOverlapFactor = 1 - (overlapPct / 100);
