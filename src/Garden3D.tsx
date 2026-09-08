@@ -60,7 +60,10 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
   const imageZoom = plant.imageZoom ?? 4;
   const map = useMemo(() => (plant.image ? loadPlantTexture(plant.image, imageZoom) : null), [plant.image, imageZoom]);
   const opacity = plant.opacity ?? 1;
-  const materialProps = { color: plant.color, map, transparent: opacity < 1, opacity };
+  // meshStandardMaterial multiplies `color` by `map` — leaving color at the
+  // plant's (usually saturated) fill color darkens/tints a photo texture on
+  // top of it. White leaves the texture's own colors untouched.
+  const materialProps = { color: map ? '#ffffff' : plant.color, map, transparent: opacity < 1, opacity };
 
   return (
     <group position={[wx, 0, wz]}>

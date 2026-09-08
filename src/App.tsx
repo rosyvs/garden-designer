@@ -100,6 +100,7 @@ export default function App() {
   const designAreaRef = useRef<HTMLDivElement>(null);
   const [designAreaSize, setDesignAreaSize] = useState({ width: 0, height: 0 });
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
+  const [canvasZoom, setCanvasZoom] = useState(1);
   const garden3DRef = useRef<Garden3DHandle>(null);
   const stepAnimRef = useRef<number | null>(null);
 
@@ -841,18 +842,22 @@ export default function App() {
   // Reserve a margin around the bed (at least double the largest plant's
   // diameter) so there's room to drag plants outside the box while
   // rearranging, without them immediately hitting the edge of the pane.
+  // Capped relative to the bed's own SMALLEST dimension — capping against the
+  // largest dimension still let a long, narrow bed get swamped on its short
+  // axis by a margin sized for the long one (or by a single oversized
+  // specimen plant like an existing tree), squeezing the bed down to a sliver.
   const largestDiameter = plantConfig.reduce((max, p) => Math.max(max, p.radius * 2), 0);
-  const padFeet = largestDiameter * 2;
+  const padFeet = Math.min(largestDiameter * 1.5, Math.min(bedWidth, bedHeight) * 0.25);
   const effWidth = bedWidth + 2 * padFeet;
   const effHeight = bedHeight + 2 * padFeet;
   const effRatio = effWidth / effHeight;
   const availRatio = designAreaSize.width / designAreaSize.height;
   const fitToAvailableSpace = designAreaSize.width > 0 && designAreaSize.height > 0;
   const effBoxWidth = fitToAvailableSpace
-    ? (availRatio > effRatio ? designAreaSize.height * effRatio : designAreaSize.width)
+    ? (availRatio > effRatio ? designAreaSize.height * effRatio : designAreaSize.width) * canvasZoom
     : 0;
   const effBoxHeight = fitToAvailableSpace
-    ? (availRatio > effRatio ? designAreaSize.height : designAreaSize.width / effRatio)
+    ? (availRatio > effRatio ? designAreaSize.height : designAreaSize.width / effRatio) * canvasZoom
     : 0;
   const scale = fitToAvailableSpace ? effBoxWidth / effWidth : 0;
   const padPx = padFeet * scale;
@@ -878,6 +883,39 @@ export default function App() {
             3D
           </button>
         </div>
+
+        {viewMode === '2d' && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 block mb-1">Zoom</label>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCanvasZoom(z => Math.max(0.5, z - 0.25))}
+                className="w-7 h-7 bg-stone-200 hover:bg-stone-300 rounded font-bold"
+              >
+                −
+              </button>
+              <input
+                type="range"
+                min="0.5" max="3" step="0.25"
+                value={canvasZoom}
+                onChange={(e) => setCanvasZoom(Number(e.target.value))}
+                className="flex-1 accent-emerald-600"
+              />
+              <button
+                onClick={() => setCanvasZoom(z => Math.min(3, z + 0.25))}
+                className="w-7 h-7 bg-stone-200 hover:bg-stone-300 rounded font-bold"
+              >
+                +
+              </button>
+              <span className="text-xs font-bold text-slate-700 w-10 text-right">{Math.round(canvasZoom * 100)}%</span>
+            </div>
+            {canvasZoom !== 1 && (
+              <button onClick={() => setCanvasZoom(1)} className="text-[10px] text-emerald-700 hover:text-emerald-800 underline cursor-pointer mt-1">
+                Reset zoom
+              </button>
+            )}
+          </div>
+        )}
 
         {viewMode === '3d' && (
           <div className="mb-4">
@@ -968,7 +1006,10 @@ export default function App() {
           </div>
         ))}
       </div>
-      <div ref={designAreaRef} className="flex-1 p-8 flex items-center justify-center">
+      <div
+        ref={designAreaRef}
+        className={`flex-1 p-8 overflow-auto ${canvasZoom > 1 ? '' : 'flex items-center justify-center'}`}
+      >
         {viewMode === '3d' ? (
           <div className="w-full h-full flex flex-col">
             <div className="flex-1 rounded-lg overflow-hidden border-2 border-stone-400 bg-stone-100">
@@ -991,28 +1032,14 @@ export default function App() {
                 boxSizing: 'border-box',
               }}
             >
-              {/* Full-bleed backdrop photo, spanning the padded margin as well as the
-                  bed itself — the bed fill/border below is made transparent so this
-                  shows through the whole arrangement screen, not just the bed outline. */}
-              {backgroundImage && (
-                <img
-                  src={backgroundImage.src}
-                  alt=""
-                  className="absolute pointer-events-none select-none"
-                  style={{
-                    left: `${((backgroundImage.xFt + padFeet) / effWidth) * 100}%`,
-                    top: `${((backgroundImage.yFt + padFeet) / effHeight) * 100}%`,
-                    width: `${(backgroundImage.widthFt / effWidth) * 100}%`,
-                    height: `${(backgroundImage.heightFt / effHeight) * 100}%`,
-                  }}
-                />
-              )}
               <div
                 ref={containerRef}
-                className={`relative w-full h-full ${backgroundImage ? 'bg-stone-200/40' : 'bg-stone-200'} ${bedPolygon ? '' : `border-2 ${backgroundImage ? 'border-transparent' : 'border-stone-400'}`}`}
+                className={`relative w-full h-full bg-stone-200 ${bedPolygon ? '' : 'border-2 border-stone-400'}`}
               >
-                {/* Clipped to the bed's true outline — the dot grid is backdrop
-                    only, so only this layer (not the plants below) is masked. */}
+                {/* Clipped to the bed's true outline — same coordinate space
+                    (bedWidth x bedHeight) the shape editor traced the outline
+                    in, so the photo stays locked to the bed exactly as drawn,
+                    cropped to the outline rather than spilling past it. */}
                 <div
                   className="absolute inset-0 overflow-hidden"
                   style={{
@@ -1022,7 +1049,21 @@ export default function App() {
                       ? `polygon(${bedPolygon.map(v => `${(v.x / bedWidth) * 100}% ${(v.y / bedHeight) * 100}%`).join(', ')})`
                       : undefined,
                   }}
-                />
+                >
+                  {backgroundImage && (
+                    <img
+                      src={backgroundImage.src}
+                      alt=""
+                      className="absolute pointer-events-none select-none"
+                      style={{
+                        left: `${(backgroundImage.xFt / bedWidth) * 100}%`,
+                        top: `${(backgroundImage.yFt / bedHeight) * 100}%`,
+                        width: `${(backgroundImage.widthFt / bedWidth) * 100}%`,
+                        height: `${(backgroundImage.heightFt / bedHeight) * 100}%`,
+                      }}
+                    />
+                  )}
+                </div>
                 {bedPolygon && (
                   <svg
                     className="absolute inset-0 w-full h-full pointer-events-none"
