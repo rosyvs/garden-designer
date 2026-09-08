@@ -101,6 +101,7 @@ export default function App() {
   const [designAreaSize, setDesignAreaSize] = useState({ width: 0, height: 0 });
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   const [canvasZoom, setCanvasZoom] = useState(1);
+  const [plantRenderMode, setPlantRenderMode] = useState<'schematic' | 'photo'>('schematic');
   const garden3DRef = useRef<Garden3DHandle>(null);
   const stepAnimRef = useRef<number | null>(null);
 
@@ -917,6 +918,26 @@ export default function App() {
           </div>
         )}
 
+        {viewMode === '2d' && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 block mb-1">Plant Style</label>
+            <div className="flex bg-slate-100 rounded-lg p-1 text-sm font-semibold">
+              <button
+                onClick={() => setPlantRenderMode('schematic')}
+                className={`flex-1 py-1 rounded-md transition-colors ${plantRenderMode === 'schematic' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}
+              >
+                Schematic
+              </button>
+              <button
+                onClick={() => setPlantRenderMode('photo')}
+                className={`flex-1 py-1 rounded-md transition-colors ${plantRenderMode === 'photo' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}
+              >
+                Photo
+              </button>
+            </div>
+          </div>
+        )}
+
         {viewMode === '3d' && (
           <div className="mb-4">
             <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 block mb-1">Camera</label>
@@ -1103,14 +1124,14 @@ export default function App() {
                       left: `${((p.x - p.radius) / bedWidth) * 100}%`,
                       top: `${((p.y - p.radius) / bedHeight) * 100}%`,
                       backgroundColor: p.color,
-                      backgroundImage: p.image ? `url(${p.image})` : undefined,
-                      backgroundSize: p.image ? plantImageBgSize(p) : undefined,
+                      backgroundImage: plantRenderMode === 'photo' && p.image ? `url(${p.image})` : undefined,
+                      backgroundSize: plantRenderMode === 'photo' && p.image ? plantImageBgSize(p) : undefined,
                       color: p.textColor,
                       opacity: (draggedId === p.instanceId ? 0.6 : 0.9) * (p.opacity ?? 1),
                       transition: draggedId === p.instanceId ? 'none' : 'transform 0.1s ease-out'
                     }}
                   >
-                    {p.id}
+                    {plantRenderMode === 'schematic' && p.id}
                     <button
                       type="button"
                       onPointerDown={(e) => e.stopPropagation()}
