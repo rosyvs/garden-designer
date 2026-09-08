@@ -9,6 +9,10 @@ export interface PlantType {
   defaultSize: number;
   radius: number;
   count: number;
+  // Optional data-URI image used as a fill texture instead of a flat color.
+  image?: string;
+  // Fill opacity, 0-1. Undefined is treated as fully opaque (1).
+  opacity?: number;
 }
 
 export interface PlantInstance extends PlantType {

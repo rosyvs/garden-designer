@@ -3,9 +3,22 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { PerspectiveCamera } from 'three';
-import { DoubleSide, Shape } from 'three';
+import { DoubleSide, Shape, TextureLoader } from 'three';
 import { isInBed } from './layoutEngines';
 import type { PlantInstance, Point } from './layoutEngines';
+
+// Cache decoded textures by src so identical plant-type images (many
+// instances of the same type) share one GPU upload instead of reloading it
+// per-instance.
+const textureCache = new Map<string, ReturnType<TextureLoader['load']>>();
+const loadPlantTexture = (src: string) => {
+  let tex = textureCache.get(src);
+  if (!tex) {
+    tex = new TextureLoader().load(src);
+    textureCache.set(src, tex);
+  }
+  return tex;
+};
 
 export type CameraPreset = 'top' | 'isometric' | 'front' | 'reset';
 
@@ -33,6 +46,9 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
   const height = Math.max(plant.height, 0.1);
   const radius = footprint / 2;
   const isOutOfBounds = !plant.locked && !isInBed(plant.x, plant.y, bedWidth, bedHeight, bedPolygon);
+  const map = useMemo(() => (plant.image ? loadPlantTexture(plant.image) : null), [plant.image]);
+  const opacity = plant.opacity ?? 1;
+  const materialProps = { color: plant.color, map, transparent: opacity < 1, opacity };
 
   return (
     <group position={[wx, 0, wz]}>
@@ -45,12 +61,17 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
       {plant.shape === 'cone' ? (
         <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
           <coneGeometry args={[radius, height, 24]} />
-          <meshStandardMaterial color={plant.color} />
+          <meshStandardMaterial {...materialProps} />
+        </mesh>
+      ) : plant.shape === 'cylinder' ? (
+        <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
+          <cylinderGeometry args={[radius, radius, height, 24]} />
+          <meshStandardMaterial {...materialProps} />
         </mesh>
       ) : (
         <mesh position={[0, height / 2, 0]} scale={[1, height / footprint, 1]} castShadow receiveShadow>
           <sphereGeometry args={[radius, 24, 16]} />
-          <meshStandardMaterial color={plant.color} />
+          <meshStandardMaterial {...materialProps} />
         </mesh>
       )}
     </group>
