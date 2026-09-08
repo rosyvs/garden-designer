@@ -93,6 +93,8 @@ export default function App() {
   const [plantConfig, setPlantConfig] = useState<PlantType[]>(() => savedGardenState?.plantConfig || defaultPlantConfig);
   const [activePlants, setActivePlants] = useState<PlantInstance[]>(() => savedGardenState?.activePlants ?? []);
   const [draggedId, setDraggedId] = useState<number | null>(null);
+  const [dragHistory, setDragHistory] = useState<PlantInstance[][]>([]);
+  const dragStartSnapshotRef = useRef<PlantInstance[] | null>(null);
   const [selectedEngineId, setSelectedEngineId] = useState(() => savedGardenState?.selectedEngineId || layoutEngines[0].id);
   const [engineParams, setEngineParams] = useState<Record<string, number>>(() => savedGardenState?.engineParams ?? {});
   const [selectedPresetId, setSelectedPresetId] = useState(presets[0]?.id ?? '');
@@ -238,6 +240,18 @@ export default function App() {
     setActivePlants(prev => prev.map(p =>
       p.instanceId === instanceId ? { ...p, locked: !p.locked } : p
     ));
+  };
+
+  // Capped so an unbroken session of dragging plants around doesn't grow
+  // this without bound.
+  const MAX_DRAG_HISTORY = 50;
+
+  const undoLastDrag = () => {
+    setDragHistory(prev => {
+      if (prev.length === 0) return prev;
+      setActivePlants(prev[prev.length - 1]);
+      return prev.slice(0, -1);
+    });
   };
 
   const stopIsingStepping = () => {
@@ -971,6 +985,16 @@ export default function App() {
         </p>
 
         <button onClick={generateLayout} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm font-semibold">🎲 Randomise Layout</button>
+        {viewMode === '2d' && (
+          <button
+            onClick={undoLastDrag}
+            disabled={dragHistory.length === 0}
+            title={dragHistory.length === 0 ? 'No drag to undo' : `Undo last drag (${dragHistory.length} available)`}
+            className="w-full bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-stone-300 p-2 rounded mb-4 text-sm font-semibold"
+          >
+            ↩️ Undo Drag
+          </button>
+        )}
         <button onClick={() => setScreen('setup')} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm">⚙️ Back to Setup</button>
         <button onClick={handleExportConfig} className="w-full bg-stone-200 p-2 rounded mb-6 text-sm">💾 Export Config</button>
 
@@ -1114,10 +1138,18 @@ export default function App() {
                       e.stopPropagation();
                       if (p.locked) return;
                       e.currentTarget.setPointerCapture(e.pointerId);
+                      dragStartSnapshotRef.current = activePlants;
                       setDraggedId(p.instanceId);
                     }}
                     onPointerMove={handlePointerMove}
-                    onPointerUp={() => setDraggedId(null)}
+                    onPointerUp={() => {
+                      setDraggedId(null);
+                      const snapshot = dragStartSnapshotRef.current;
+                      dragStartSnapshotRef.current = null;
+                      if (snapshot) {
+                        setDragHistory(prev => [...prev.slice(-(MAX_DRAG_HISTORY - 1)), snapshot]);
+                      }
+                    }}
                     // z-index rises on hover (and stays modestly raised while
                     // locked) so a plant's own corner badge — which pokes just
                     // outside its circle — always paints above a neighboring,
