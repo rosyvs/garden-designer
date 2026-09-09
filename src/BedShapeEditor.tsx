@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { computeHomography } from './perspectiveTransform';
 import type { Point } from './layoutEngines';
 
 export interface BackgroundImage {
@@ -22,6 +23,10 @@ interface ScaleBar {
   x2: number;
   y2: number;
 }
+
+// Order matters: top-left, top-right, bottom-right, bottom-left — matches
+// the winding perspective-transform expects for both src and dst points.
+type GroundCorners = [Point, Point, Point, Point];
 
 interface BedShapeEditorProps {
   // Not restored into the canvas on open — the original freehand pixel path
@@ -47,6 +52,17 @@ const defaultScaleBar = (width: number, height: number): ScaleBar => ({
   y2: height * 0.92,
 });
 
+// A trapezoid narrowing toward the top — the natural shape of a real-world
+// rectangle photographed from ground level, where the far edge (small y,
+// higher in frame) looks narrower than the near edge (large y, lower in
+// frame, closer to the camera).
+const defaultGroundCorners = (width: number, height: number): GroundCorners => [
+  { x: width * 0.35, y: height * 0.35 }, // top-left (far)
+  { x: width * 0.65, y: height * 0.35 }, // top-right (far)
+  { x: width * 0.85, y: height * 0.8 },  // bottom-right (near)
+  { x: width * 0.15, y: height * 0.8 },  // bottom-left (near)
+];
+
 export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSave }: BedShapeEditorProps) {
   const [step, setStep] = useState<'scale' | 'trace'>('scale');
   const [image, setImage] = useState<LoadedImage | null>(() => {
@@ -58,6 +74,17 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
   const [scaleBar, setScaleBar] = useState<ScaleBar>(() => defaultScaleBar(DEFAULT_CANVAS.width, DEFAULT_CANVAS.height));
   const [scaleFeet, setScaleFeet] = useState('10');
   const [draggingHandle, setDraggingHandle] = useState<'a' | 'b' | null>(null);
+  // Ground-level mode: instead of a linear scale bar, calibrate a real-world
+  // rectangle (e.g. a patio slab, a section of fence) via 4 corner points,
+  // then map traced points through the resulting perspective transform —
+  // for a photo taken standing at ground level rather than from directly
+  // overhead, where a single linear scale can't correct for the perspective
+  // skew (near edges of the bed look bigger than far edges).
+  const [photoMode, setPhotoMode] = useState<'topdown' | 'ground'>('topdown');
+  const [groundCorners, setGroundCorners] = useState<GroundCorners>(() => defaultGroundCorners(DEFAULT_CANVAS.width, DEFAULT_CANVAS.height));
+  const [groundWidthFt, setGroundWidthFt] = useState('10');
+  const [groundDepthFt, setGroundDepthFt] = useState('10');
+  const [draggingCorner, setDraggingCorner] = useState<number | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [pathPoints, setPathPoints] = useState<Point[]>([]);
   const [outline, setOutline] = useState<Point[] | null>(null);
@@ -83,6 +110,7 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
     img.onload = () => {
       setImage({ src: initialBackgroundImage.src, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight });
       setScaleBar(defaultScaleBar(img.naturalWidth, img.naturalHeight));
+      setGroundCorners(defaultGroundCorners(img.naturalWidth, img.naturalHeight));
     };
     img.src = initialBackgroundImage.src;
     // Only ever recover the image this editor was opened with, once.
@@ -109,6 +137,7 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
         ctx.drawImage(img, 0, 0, w, h);
         setImage({ src: canvas.toDataURL('image/jpeg', 0.85), naturalWidth: w, naturalHeight: h });
         setScaleBar(defaultScaleBar(w, h));
+        setGroundCorners(defaultGroundCorners(w, h));
         setOutline(null);
         setPathPoints([]);
       };
@@ -120,12 +149,14 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
   const handleClearImage = () => {
     setImage(null);
     setScaleBar(defaultScaleBar(DEFAULT_CANVAS.width, DEFAULT_CANVAS.height));
+    setGroundCorners(defaultGroundCorners(DEFAULT_CANVAS.width, DEFAULT_CANVAS.height));
+    setPhotoMode('topdown');
     setOutline(null);
     setPathPoints([]);
   };
 
   const handleCanvasPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (step !== 'trace' || draggingHandle) return;
+    if (step !== 'trace' || draggingHandle || draggingCorner !== null) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     const pt = toCanvasCoords(e);
     setIsDrawing(true);
@@ -137,6 +168,10 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
     const pt = toCanvasCoords(e);
     if (draggingHandle) {
       setScaleBar(prev => draggingHandle === 'a' ? { ...prev, x1: pt.x, y1: pt.y } : { ...prev, x2: pt.x, y2: pt.y });
+      return;
+    }
+    if (draggingCorner !== null) {
+      setGroundCorners(prev => prev.map((c, i) => i === draggingCorner ? pt : c) as GroundCorners);
       return;
     }
     if (!isDrawing) return;
@@ -154,6 +189,7 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
 
   const handleCanvasPointerUp = () => {
     setDraggingHandle(null);
+    setDraggingCorner(null);
     if (isDrawing) {
       setIsDrawing(false);
       setPathPoints(prev => {
@@ -171,19 +207,50 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
     return barLengthPx > 0 && feet > 0 ? feet / barLengthPx : 0;
   })();
 
-  const canProceedToTrace = ftPerPixel > 0;
-  const canSave = outline !== null && outline.length >= 3 && ftPerPixel > 0;
+  const groundRectFt = (() => {
+    const w = parseFloat(groundWidthFt);
+    const d = parseFloat(groundDepthFt);
+    return w > 0 && d > 0 ? { w, d } : null;
+  })();
+
+  const canProceedToTrace = photoMode === 'ground' ? groundRectFt !== null : ftPerPixel > 0;
+  const canSave = outline !== null && outline.length >= 3 && canProceedToTrace;
 
   const handleSave = () => {
-    if (!outline || ftPerPixel <= 0) return;
-    const polygonFt = outline.map(p => ({ x: p.x * ftPerPixel, y: p.y * ftPerPixel }));
+    if (!outline) return;
+
+    let polygonFt: Point[];
+    if (photoMode === 'ground') {
+      if (!groundRectFt) return;
+      // Map the calibration quad (in photo pixel space) straight onto a
+      // rectangle sized in real feet — the transform then converts any
+      // traced point directly to feet, correcting for the photo's
+      // perspective skew in the same step, no separate linear scale needed.
+      const dstCorners: Point[] = [
+        { x: 0, y: 0 },
+        { x: groundRectFt.w, y: 0 },
+        { x: groundRectFt.w, y: groundRectFt.d },
+        { x: 0, y: groundRectFt.d },
+      ];
+      const transform = computeHomography(groundCorners, dstCorners);
+      polygonFt = outline.map(p => transform.transform(p.x, p.y));
+    } else {
+      if (ftPerPixel <= 0) return;
+      polygonFt = outline.map(p => ({ x: p.x * ftPerPixel, y: p.y * ftPerPixel }));
+    }
+
     const minX = Math.min(...polygonFt.map(p => p.x));
     const minY = Math.min(...polygonFt.map(p => p.y));
     const maxX = Math.max(...polygonFt.map(p => p.x));
     const maxY = Math.max(...polygonFt.map(p => p.y));
     const normalized = polygonFt.map(p => ({ x: p.x - minX, y: p.y - minY }));
 
-    const bg: BackgroundImage | null = image && image.naturalWidth > 0 ? {
+    // The perspective-corrected shape is geometrically accurate, but the
+    // source photo itself is still the raw skewed ground-level shot — it
+    // isn't warped, so it can't be positioned/clipped in the top-down design
+    // view the way a true overhead photo can. Only carry the photo through
+    // as a background when it was actually shot top-down.
+    const bg: BackgroundImage | null = photoMode === 'topdown' && image && image.naturalWidth > 0 ? {
       src: image.src,
       xFt: -minX,
       yFt: -minY,
@@ -203,7 +270,7 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
           <h1 className="text-lg font-bold text-slate-900">Draw Custom Bed Shape</h1>
           <p className="text-xs text-slate-500 mt-1">
             {step === 'scale'
-              ? 'Optionally load a top-down photo, then set the scale by matching the bar to a known real-world distance.'
+              ? 'Optionally load a photo, then calibrate its scale.'
               : 'Trace the bed outline by dragging around its edge.'}
           </p>
         </div>
@@ -222,20 +289,74 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
               )}
             </div>
 
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Scale bar length (feet)</label>
-              <input
-                type="number"
-                min="0.1"
-                step="0.1"
-                value={scaleFeet}
-                onChange={(e) => setScaleFeet(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
-              <p className="text-[10px] text-slate-400 mt-1 leading-tight">
-                Drag the two handles on the canvas so the bar matches a known real-world distance (e.g. a paving slab, a fence panel), then enter that distance here.
-              </p>
-            </div>
+            {image && (
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Photo type</label>
+                <div className="flex bg-slate-100 rounded-lg p-1 text-xs font-semibold">
+                  <button
+                    onClick={() => setPhotoMode('topdown')}
+                    className={`flex-1 py-1.5 rounded-md transition-colors ${photoMode === 'topdown' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}
+                  >
+                    Top-down
+                  </button>
+                  <button
+                    onClick={() => setPhotoMode('ground')}
+                    className={`flex-1 py-1.5 rounded-md transition-colors ${photoMode === 'ground' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}
+                  >
+                    Ground-level
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {photoMode === 'topdown' ? (
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Scale bar length (feet)</label>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={scaleFeet}
+                  onChange={(e) => setScaleFeet(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="text-[10px] text-slate-400 mt-1 leading-tight">
+                  Drag the two handles on the canvas so the bar matches a known real-world distance (e.g. a paving slab, a fence panel), then enter that distance here.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[10px] text-slate-400 mb-2 leading-tight">
+                  Drag the 4 corner handles onto a rectangular reference area visible in the photo (a patio, a section of fence, a garage door — anything you know the real size of), then enter its dimensions below. The bed outline you trace next will be corrected for the camera's perspective automatically.
+                </p>
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <label className="text-xs text-slate-500 block mb-1">Reference width (ft)</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={groundWidthFt}
+                      onChange={(e) => setGroundWidthFt(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                    <p className="text-[9px] text-slate-400 mt-1 leading-tight">Left-right, between the two near (bottom) corners.</p>
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs text-slate-500 block mb-1">Reference depth (ft)</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={groundDepthFt}
+                      onChange={(e) => setGroundDepthFt(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                    <p className="text-[9px] text-slate-400 mt-1 leading-tight">Near (bottom) edge to far (top) edge.</p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <button
               onClick={() => setStep('trace')}
@@ -315,7 +436,7 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
             )
           )}
 
-          {step === 'scale' && (
+          {step === 'scale' && photoMode === 'topdown' && (
             <g>
               <line x1={scaleBar.x1} y1={scaleBar.y1} x2={scaleBar.x2} y2={scaleBar.y2} stroke="#f59e0b" strokeWidth={Math.max(canvasSize.width, canvasSize.height) * 0.005} />
               {(['a', 'b'] as const).map(handle => {
@@ -337,6 +458,33 @@ export default function BedShapeEditor({ initialBackgroundImage, onCancel, onSav
                   />
                 );
               })}
+            </g>
+          )}
+
+          {step === 'scale' && photoMode === 'ground' && (
+            <g>
+              <polygon
+                points={pointsToSvgAttr(groundCorners)}
+                fill="rgba(245,158,11,0.15)"
+                stroke="#f59e0b"
+                strokeWidth={Math.max(canvasSize.width, canvasSize.height) * 0.004}
+              />
+              {groundCorners.map((c, i) => (
+                <circle
+                  key={i}
+                  cx={c.x} cy={c.y}
+                  r={Math.max(canvasSize.width, canvasSize.height) * 0.012}
+                  fill="#f59e0b"
+                  stroke="#78350f"
+                  strokeWidth={Math.max(canvasSize.width, canvasSize.height) * 0.002}
+                  className="cursor-grab"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    (e.target as SVGCircleElement).setPointerCapture(e.pointerId);
+                    setDraggingCorner(i);
+                  }}
+                />
+              ))}
             </g>
           )}
         </svg>
