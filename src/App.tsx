@@ -292,6 +292,18 @@ export default function App() {
 
   useEffect(() => stopIsingStepping, []);
 
+  // Shared by 2D pointer-drag and 3D ground-plane drag: moves one plant to
+  // a bed-space position and lets everything else react to it (unless
+  // `permeable`, which lets it pass through neighbors without pushing them).
+  const movePlantTo = (instanceId: number, x: number, y: number, permeable: boolean) => {
+    setActivePlants(prev => {
+      const moved = prev.map(p =>
+        p.instanceId === instanceId && !p.locked ? { ...p, x, y } : p
+      );
+      return permeable ? moved : resolveCollisions(instanceId, moved, overlapPct);
+    });
+  };
+
   const handlePointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (draggedId === null || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
@@ -301,14 +313,23 @@ export default function App() {
 
     // Holding Shift makes the dragged plant "permeable" — it can be moved
     // through/over other plants without pushing them out of the way.
-    const permeable = e.shiftKey;
+    movePlantTo(draggedId, mouseX, mouseY, e.shiftKey);
+  };
 
-    setActivePlants(prev => {
-      const moved = prev.map(p =>
-        p.instanceId === draggedId && !p.locked ? { ...p, x: mouseX, y: mouseY } : p
-      );
-      return permeable ? moved : resolveCollisions(draggedId, moved, overlapPct);
-    });
+  // 3D drag: Garden3D reports raw ground-plane hits; the history snapshot
+  // (for Undo) is captured here at drag start, same as the 2D drag flow.
+  const handle3DDragStart = () => {
+    dragStartSnapshotRef.current = activePlants;
+  };
+
+  const handle3DDragMove = (instanceId: number, x: number, y: number) => {
+    movePlantTo(instanceId, x, y, false);
+  };
+
+  const handle3DDragEnd = () => {
+    const snapshot = dragStartSnapshotRef.current;
+    dragStartSnapshotRef.current = null;
+    if (snapshot) pushArrangementHistory(snapshot);
   };
 
   const updatePlantCount = (id: number, count: number) => {
@@ -992,16 +1013,14 @@ export default function App() {
         </p>
 
         <button onClick={generateLayout} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm font-semibold">🎲 Randomise Layout</button>
-        {viewMode === '2d' && (
-          <button
-            onClick={undoLastArrangementChange}
-            disabled={arrangementHistory.length === 0}
-            title={arrangementHistory.length === 0 ? 'Nothing to undo' : `Undo last change (${arrangementHistory.length} available)`}
-            className="w-full bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-stone-300 p-2 rounded mb-4 text-sm font-semibold"
-          >
-            ↩️ Undo
-          </button>
-        )}
+        <button
+          onClick={undoLastArrangementChange}
+          disabled={arrangementHistory.length === 0}
+          title={arrangementHistory.length === 0 ? 'Nothing to undo' : `Undo last change (${arrangementHistory.length} available)`}
+          className="w-full bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-stone-300 p-2 rounded mb-4 text-sm font-semibold"
+        >
+          ↩️ Undo
+        </button>
         <button onClick={() => setScreen('setup')} className="w-full bg-stone-200 p-2 rounded mb-4 text-sm">⚙️ Back to Setup</button>
         <button onClick={handleExportConfig} className="w-full bg-stone-200 p-2 rounded mb-6 text-sm">💾 Export Config</button>
 
@@ -1072,7 +1091,16 @@ export default function App() {
           <div className="w-full h-full flex flex-col">
             <div className="flex-1 rounded-lg overflow-hidden border-2 border-stone-400 bg-stone-100">
               <Suspense fallback={<div className="w-full h-full flex items-center justify-center text-sm text-slate-400">Loading 3D view…</div>}>
-                <Garden3D ref={garden3DRef} bedWidth={bedWidth} bedHeight={bedHeight} bedPolygon={bedPolygon} activePlants={activePlants} />
+                <Garden3D
+                  ref={garden3DRef}
+                  bedWidth={bedWidth}
+                  bedHeight={bedHeight}
+                  bedPolygon={bedPolygon}
+                  activePlants={activePlants}
+                  onDragStart={handle3DDragStart}
+                  onDragMove={handle3DDragMove}
+                  onDragEnd={handle3DDragEnd}
+                />
               </Suspense>
             </div>
             <p className={`text-xs text-right text-amber-600 mt-1 transition-opacity ${plantsOutOfBounds ? 'opacity-100' : 'opacity-0'}`}>

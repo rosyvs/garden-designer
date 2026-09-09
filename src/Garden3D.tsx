@@ -1,5 +1,6 @@
-import { useMemo, useRef, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useMemo, useRef, useState, useImperativeHandle, forwardRef } from 'react';
 import { Canvas } from '@react-three/fiber';
+import type { ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { PerspectiveCamera } from 'three';
@@ -42,6 +43,12 @@ interface Garden3DProps {
   bedHeight: number;
   bedPolygon: Point[] | null;
   activePlants: PlantInstance[];
+  // Drag a plant across the ground plane, mirroring the 2D canvas's drag
+  // behavior (collision resolution, undo history) — the parent owns that
+  // logic, this component just reports raw pointer-on-ground-plane hits.
+  onDragStart?: () => void;
+  onDragMove?: (instanceId: number, x: number, y: number) => void;
+  onDragEnd?: () => void;
 }
 
 // Maps bed-space (x, y) — origin top-left, x right, y down — onto the XZ
@@ -51,7 +58,18 @@ const toWorld = (x: number, y: number, bedWidth: number, bedHeight: number): [nu
   y - bedHeight / 2,
 ];
 
-function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstance; bedWidth: number; bedHeight: number; bedPolygon: Point[] | null }) {
+// Inverse of toWorld — recovers bed-space (x, y) from a ground-plane hit.
+const toBedSpace = (worldX: number, worldZ: number, bedWidth: number, bedHeight: number): [number, number] => [
+  worldX + bedWidth / 2,
+  worldZ + bedHeight / 2,
+];
+
+function Plant({
+  plant, bedWidth, bedHeight, bedPolygon, isDragging, onDragStart,
+}: {
+  plant: PlantInstance; bedWidth: number; bedHeight: number; bedPolygon: Point[] | null;
+  isDragging: boolean; onDragStart: (e: ThreeEvent<PointerEvent>) => void;
+}) {
   const [wx, wz] = toWorld(plant.x, plant.y, bedWidth, bedHeight);
   const footprint = Math.max(plant.spread, 0.1);
   const height = Math.max(plant.height, 0.1);
@@ -64,9 +82,17 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
   // plant's (usually saturated) fill color darkens/tints a photo texture on
   // top of it. White leaves the texture's own colors untouched.
   const materialProps = { color: map ? '#ffffff' : plant.color, map, transparent: opacity < 1, opacity };
+  // The plant being dragged shouldn't intercept the ground-plane raycast
+  // used to track the drag itself (it sits right over its own drop point).
+  const raycast = isDragging ? () => null : undefined;
 
   return (
-    <group position={[wx, 0, wz]}>
+    <group
+      position={[wx, 0, wz]}
+      onPointerDown={plant.locked ? undefined : onDragStart}
+      onPointerOver={plant.locked ? undefined : (e) => { e.stopPropagation(); document.body.style.cursor = 'grab'; }}
+      onPointerOut={plant.locked ? undefined : () => { document.body.style.cursor = 'auto'; }}
+    >
       {isOutOfBounds && (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
           <ringGeometry args={[radius * 0.85, radius * 1.05, 32]} />
@@ -80,6 +106,7 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
         <mesh
           position={[0, height / 2, 0]}
           rotation={plant.shape === 'cone-inverted' ? [Math.PI, 0, 0] : [0, 0, 0]}
+          raycast={raycast}
           castShadow
           receiveShadow
         >
@@ -87,12 +114,12 @@ function Plant({ plant, bedWidth, bedHeight, bedPolygon }: { plant: PlantInstanc
           <meshStandardMaterial {...materialProps} />
         </mesh>
       ) : plant.shape === 'cylinder' ? (
-        <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
+        <mesh position={[0, height / 2, 0]} raycast={raycast} castShadow receiveShadow>
           <cylinderGeometry args={[radius, radius, height, 24]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
       ) : (
-        <mesh position={[0, height / 2, 0]} scale={[1, height / footprint, 1]} castShadow receiveShadow>
+        <mesh position={[0, height / 2, 0]} scale={[1, height / footprint, 1]} raycast={raycast} castShadow receiveShadow>
           <sphereGeometry args={[radius, 24, 16]} />
           <meshStandardMaterial {...materialProps} />
         </mesh>
@@ -127,12 +154,30 @@ const buildGroundShape = (bedWidth: number, bedHeight: number, bedPolygon: Point
   return shape;
 };
 
-const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({ bedWidth, bedHeight, bedPolygon, activePlants }, ref) => {
+const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({
+  bedWidth, bedHeight, bedPolygon, activePlants, onDragStart, onDragMove, onDragEnd,
+}, ref) => {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const diag = Math.sqrt(bedWidth * bedWidth + bedHeight * bedHeight) || 1;
   const initialDist = diag * 1.3;
   const gridSize = useMemo(() => Math.max(bedWidth, bedHeight), [bedWidth, bedHeight]);
   const groundShape = useMemo(() => buildGroundShape(bedWidth, bedHeight, bedPolygon), [bedWidth, bedHeight, bedPolygon]);
+  const [draggedId, setDraggedId] = useState<number | null>(null);
+
+  // A native window listener rather than an R3F pointerUp handler: the
+  // pointer can end a drag anywhere (off the ground mesh entirely, e.g.
+  // released over empty sky), and this must fire regardless of what — if
+  // anything — is under it at release time.
+  useEffect(() => {
+    if (draggedId === null) return;
+    const handleUp = () => {
+      setDraggedId(null);
+      document.body.style.cursor = 'auto';
+      onDragEnd?.();
+    };
+    window.addEventListener('pointerup', handleUp);
+    return () => window.removeEventListener('pointerup', handleUp);
+  }, [draggedId, onDragEnd]);
 
   useImperativeHandle(ref, () => ({
     setView: (preset: CameraPreset) => {
@@ -169,17 +214,40 @@ const Garden3D = forwardRef<Garden3DHandle, Garden3DProps>(({ bedWidth, bedHeigh
         shadow-mapSize={[1024, 1024]}
       />
 
-      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+        onPointerMove={(e) => {
+          if (draggedId === null) return;
+          e.stopPropagation();
+          const [x, y] = toBedSpace(e.point.x, e.point.z, bedWidth, bedHeight);
+          onDragMove?.(draggedId, x, y);
+        }}
+      >
         <shapeGeometry args={[groundShape]} />
         <meshStandardMaterial color="#d6d3d1" side={DoubleSide} />
       </mesh>
       <gridHelper args={[gridSize, gridSize]} position={[0, 0.001, 0]} />
 
       {activePlants.map(p => (
-        <Plant key={p.instanceId} plant={p} bedWidth={bedWidth} bedHeight={bedHeight} bedPolygon={bedPolygon} />
+        <Plant
+          key={p.instanceId}
+          plant={p}
+          bedWidth={bedWidth}
+          bedHeight={bedHeight}
+          bedPolygon={bedPolygon}
+          isDragging={draggedId === p.instanceId}
+          onDragStart={(e) => {
+            e.stopPropagation();
+            (e.target as Element).setPointerCapture?.(e.pointerId);
+            setDraggedId(p.instanceId);
+            document.body.style.cursor = 'grabbing';
+            onDragStart?.();
+          }}
+        />
       ))}
 
-      <OrbitControls ref={controlsRef} makeDefault target={[0, 0, 0]} />
+      <OrbitControls ref={controlsRef} makeDefault enabled={draggedId === null} target={[0, 0, 0]} />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewport />
       </GizmoHelper>
